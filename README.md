@@ -1,6 +1,6 @@
 ![Rust](https://img.shields.io/badge/Rust-uMod%20Plugin-orange)
-![Version](https://img.shields.io/badge/version-1.1.0-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/github/v/release/SeesAll/SmartSmelt)
+![License](https://img.shields.io/github/license/SeesAll/SmartSmelt)
 
 # SmartSmelt
 
@@ -134,7 +134,11 @@ Bias modes:
 
 ## License
 
-Suggested: MIT (or your preferred license)
+SmartSmelt is licensed under the GNU General Public License v3.0 (GPLv3).
+
+Commercial redistribution, resale, or closed-source use requires a separate commercial license.
+
+Contact: SeesAll on uMod | N01B4ME on Discord
 
 ---
 
