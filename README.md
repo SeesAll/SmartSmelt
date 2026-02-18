@@ -1,3 +1,7 @@
+![Rust](https://img.shields.io/badge/Rust-uMod%20Plugin-orange)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 # SmartSmelt
 
 High-performance, preset-based smelting accelerator for **Rust (uMod/Oxide)** with automation-safe behavior, smart fuel pull, and population-aware **AutoTune** scheduling.
