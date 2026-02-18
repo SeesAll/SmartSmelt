@@ -1,20 +1,33 @@
 /*
- SSSSS  EEEEE  EEEEE  SSSSS      AAAAA  L      L
- S      E      E      S          A   A  L      L
- SSSSS  EEE    EEE    SSSSS      AAAAA  L      L
-     S  E      E          S      A   A  L      L
- SSSSS  EEEEE  EEEEE  SSSSS      A   A  LLLLL  LLLLL
-
-This Rust plugin is Copyright ©SeesAll.
-You may not copy, modify, merge, publish, distribute, sublicense, or sell copies of this software without explicit consent from SeesAll (aka N01B4ME).
-
-DISCLAIMER:
-THIS SOFTWARE IS PROVIDED ON AN "AS IS" AND "AS AVAILABLE" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING,
-WITHOUT LIMITATION, IMPLIED WARRANTIES OR CONDITIONS OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. TO THE MAXIMUM 
-EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE AUTHORS, COPYRIGHT HOLDERS, OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES, OR ANY OTHER LIABILITY, WHETHER IN CONTRACT, TORT (INCLUDING NEGLIGENCE), OR OTHERWISE, ARISING
-FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE OR OTHER DEALINGS IN THE SOFTWARE.
-*/
+ * SmartSmelt
+ * High-performance adaptive smelting accelerator for Rust (uMod/Oxide)
+ *
+ * Copyright (C) 2026 SeesAll
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+ 
+ /*
+ * Commercial Licensing:
+ *
+ * While this software is available under GPLv3 for open-source use,
+ * commercial redistribution, resale, bundling in paid packages,
+ * or closed-source modifications require a separate commercial license.
+ *
+ * For commercial licensing inquiries, contact:
+ * (SeesAll on uMod | N01B4ME on Discord)
+ */
 
 using System;
 using System.Collections.Generic;
