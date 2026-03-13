@@ -1,4 +1,3 @@
-![Rust](https://img.shields.io/badge/Rust-uMod%20Plugin-orange)
 ![Version](https://img.shields.io/github/v/release/SeesAll/SmartSmelt)
 ![License](https://img.shields.io/github/license/SeesAll/SmartSmelt)
 
