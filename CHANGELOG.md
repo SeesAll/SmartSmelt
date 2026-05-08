@@ -22,7 +22,6 @@
 -   Added caching for key item definitions to reduce repeated lookup overhead.
 -   Added cached oven metadata/prefab-name handling to reduce repeated string allocation.
 -   Deferred fuel recalculation after custom item movement to reduce item-move hook re-entry risk.
--   Preserved existing smelting behavior, fuel logic, ore splitting, presets, and adaptive scheduling.
 
 ##Version 1.1.6
 ### Changes
