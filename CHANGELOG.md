@@ -1,5 +1,29 @@
 # Changelog
 
+##Version 1.1.9
+### Changes
+-   Added chunked startup oven scanning to reduce possible server-frame spike during initialization.
+-   Added named constants for key timing, scan, and eviction values.
+-   Improved unload cleanup for scan/timer state.
+
+##Version 1.1.8
+### Changes
+-   Reduced temporary list allocations during fuel movement and inventory handling.
+-   Converted the pooled int-array helper from static/shared state to instance-scoped plugin state.
+-   Normalized item shortname comparisons for consistency and lower overhead.
+-   Refactored duplicated ore/crude insertion flow into shared helper logic.
+-   Improved maintainability around custom item distribution behavior.
+
+##Version 1.1.7
+### Changes
+-   Removed duplicate/suspicious OnEntityFlagsChanged hook overload to reduce risk of double-processing automation toggles.
+-   Refactored the large oven-processing logic into smaller helper methods for safer future maintenance.
+-   Replaced silent exception swallowing with debug-aware logging where appropriate.
+-   Added caching for key item definitions to reduce repeated lookup overhead.
+-   Added cached oven metadata/prefab-name handling to reduce repeated string allocation.
+-   Deferred fuel recalculation after custom item movement to reduce item-move hook re-entry risk.
+-   Preserved existing smelting behavior, fuel logic, ore splitting, presets, and adaptive scheduling.
+
 ##Version 1.1.6
 ### Changes
 -   Replaced flat refinery buffer with dynamic per-crude scaling.
