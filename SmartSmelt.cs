@@ -4,11 +4,24 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("SmartSmelt", "SeesAll", "1.1.9")]
+    [Info("SmartSmelt", "SeesAll", "1.2.2")]
     [Description("Preset-based accelerated smelting with instant sync, adaptive scaling, and smart fuel pull.")]
     public class SmartSmelt : RustPlugin
     {
         #region Configuration
+
+        private const string ItemWood = "wood";
+        private const string ItemCharcoal = "charcoal";
+        private const string ItemLowGradeFuel = "lowgradefuel";
+        private const string ItemMetalFragments = "metal.fragments";
+        private const string ItemSulfur = "sulfur";
+        private const string ItemMetalRefined = "metal.refined";
+        private const string ItemCrudeOil = "crude.oil";
+        private const string ItemMetalOre = "metal.ore";
+        private const string ItemSulfurOre = "sulfur.ore";
+        private const string ItemHqMetalOre = "hq.metal.ore";
+
+        private static readonly string[] DefaultOvenWhitelist = { "furnace", "furnace.large", "refinery", "electric.furnace" };
 
         private Configuration _config;
         private readonly List<string> _cachedWhitelistFragmentsLower = new List<string>();
@@ -27,23 +40,17 @@ namespace Oxide.Plugins
         private class Configuration
         {
             public bool Enabled = true;
-            public int ConfigVersion = 1;
+            public int ConfigVersion = 2;
             public string Preset = "10x";
             public string PresetOptions = "2x, 3x, 5x, 10x, 25x, 50x, 100x, 1000x, instant";
 
             public bool AutoTuneEnabled = true;
             public int AveragePopulation = 100;
             public string AutoTuneBias = "Balanced";
-            public bool AutoTuneWriteToConfig = true;
+            public bool AutoTuneWriteToConfig = false;
 
             public bool EnableOreSplitting = true;
-            public List<string> OvenWhitelist = new List<string>
-            {
-                "furnace",
-                "furnace.large",
-                "refinery",
-                "electric.furnace"
-            };
+            public List<string> OvenWhitelist = new List<string>(DefaultOvenWhitelist);
             public bool ForceStartCookingOnToggle = true;
             public bool VerboseTrackingLogs = false;
             public bool VerboseCycleLogs = false;
@@ -57,7 +64,9 @@ namespace Oxide.Plugins
             public int DynamicHighOvenCount = 1200;
             public float FixedGlobalLoopInterval = 0.25f;
             public bool AutoPullFuelFromPlayer = true;
-            public float AutoPullFuelBufferPercent = 0.1f;
+            public float AutoPullFuelBufferPercent = 0f;
+            public bool ReducedWoodCostEnabled = false;
+            public float WoodCostScale = 0.5f;
             public bool EnableElectricFurnaceNativeScaling = true;
             public float ElectricFurnaceThroughputScale = 2.0f;
             public float ElectricFurnaceCycleSpeedScale = 0.5f;
@@ -78,9 +87,10 @@ namespace Oxide.Plugins
         {
             base.LoadConfig();
 
+            bool shouldSaveConfig = false;
+
             if (MigrateConfigSchema())
             {
-
                 base.LoadConfig();
             }
             try
@@ -91,9 +101,13 @@ namespace Oxide.Plugins
             {
                 PrintWarning("Config was invalid; generating a new one.");
                 _config = new Configuration();
+                shouldSaveConfig = true;
             }
 
             if (NormalizeConfig())
+                shouldSaveConfig = true;
+
+            if (shouldSaveConfig)
                 SaveConfig();
 
             RebuildRuntimeCaches();
@@ -111,10 +125,10 @@ namespace Oxide.Plugins
                 ["DebugLine2"] = "Tracked ovens: {0} | Ovens/tick cap: {1} (Adaptive: {2})",
                 ["DebugLine3"] = "Global loop interval: {0:0.000}s | Desired: {1:0.000}s (Dynamic: {2})",
                 ["ConsoleDebug"] = "SmartSmelt Debug v{0} | Enabled={1} Preset={2} Mult={3}x | Tracked={4} Cap={5} | Interval={6:0.000}s Desired={7:0.000}s",
-                ["InfoLine1"] = "SmartSmelt v{0} | Preset={1} | Enabled={2} | OreSplitting={3} | AutoPullFuel={4} (Buffer={5:0.###}%)",
+                ["InfoLine1"] = "SmartSmelt v{0} | Preset={1} | Enabled={2} | OreSplitting={3} | AutoPullFuel={4} (Buffer={5:0.###}%) | WoodCost={6:0.##}x",
                 ["InfoLine2"] = "AutoTune={0} (AvgPop={1}, Bias={2}, WriteToConfig={3})",
                 ["InfoLine3"] = "TrackedOvens={0} | PerTickCap={1} (Adaptive={2}) | LoopInterval={3:0.000}s (Desired={4:0.000}s, Dynamic={5})",
-                ["ConsoleInfo"] = "SmartSmelt v{0} | Preset={1} | Enabled={2} | AutoPullFuel={3} (Buffer={4:0.###}%)\nTrackedOvens={5} | PerTickCap={6} (Adaptive={7}) | LoopInterval={8:0.000}s (Desired={9:0.000}s, Dynamic={10})"
+                ["ConsoleInfo"] = "SmartSmelt v{0} | Preset={1} | Enabled={2} | AutoPullFuel={3} (Buffer={4:0.###}%) | WoodCost={11:0.##}x\nTrackedOvens={5} | PerTickCap={6} (Adaptive={7}) | LoopInterval={8:0.000}s (Desired={9:0.000}s, Dynamic={10})"
             }, this);
         }
 
@@ -145,9 +159,37 @@ namespace Oxide.Plugins
                     changed = true;
                 }
 
+                if (version < 2)
+                {
+                    // Version 1 used FuelUsageMultiplier. Preserve its effective behavior
+                    // when translating to the clearer opt-in reduced-wood-cost settings.
+                    if (raw.TryGetValue("FuelUsageMultiplier", out var legacyFuelMultiplier))
+                    {
+                        try
+                        {
+                            float legacyScale = Mathf.Clamp(Convert.ToSingle(legacyFuelMultiplier), 0f, 1f);
+
+                            if (!raw.ContainsKey("WoodCostScale"))
+                                raw["WoodCostScale"] = legacyScale;
+
+                            if (!raw.ContainsKey("ReducedWoodCostEnabled"))
+                                raw["ReducedWoodCostEnabled"] = legacyScale < 0.999f;
+                        }
+                        catch
+                        {
+                            PrintWarning("Could not read legacy FuelUsageMultiplier; using the new wood-cost defaults.");
+                        }
+
+                        raw.Remove("FuelUsageMultiplier");
+                    }
+
+                    raw["ConfigVersion"] = 2;
+                    changed = true;
+                }
+
                 if (!raw.ContainsKey("ConfigVersion"))
                 {
-                    raw["ConfigVersion"] = 1;
+                    raw["ConfigVersion"] = 2;
                     changed = true;
                 }
 
@@ -180,16 +222,16 @@ namespace Oxide.Plugins
                 }
             }
 
-            _charcoalDefinition = ItemManager.FindItemDefinition("charcoal");
-            _woodDefinition = ItemManager.FindItemDefinition("wood");
-            _lowGradeFuelDefinition = ItemManager.FindItemDefinition("lowgradefuel");
-            _metalFragmentsDefinition = ItemManager.FindItemDefinition("metal.fragments");
-            _sulfurDefinition = ItemManager.FindItemDefinition("sulfur");
-            _metalRefinedDefinition = ItemManager.FindItemDefinition("metal.refined");
-            _crudeOilDefinition = ItemManager.FindItemDefinition("crude.oil");
-            _metalOreDefinition = ItemManager.FindItemDefinition("metal.ore");
-            _sulfurOreDefinition = ItemManager.FindItemDefinition("sulfur.ore");
-            _hqMetalOreDefinition = ItemManager.FindItemDefinition("hq.metal.ore");
+            _charcoalDefinition = ItemManager.FindItemDefinition(ItemCharcoal);
+            _woodDefinition = ItemManager.FindItemDefinition(ItemWood);
+            _lowGradeFuelDefinition = ItemManager.FindItemDefinition(ItemLowGradeFuel);
+            _metalFragmentsDefinition = ItemManager.FindItemDefinition(ItemMetalFragments);
+            _sulfurDefinition = ItemManager.FindItemDefinition(ItemSulfur);
+            _metalRefinedDefinition = ItemManager.FindItemDefinition(ItemMetalRefined);
+            _crudeOilDefinition = ItemManager.FindItemDefinition(ItemCrudeOil);
+            _metalOreDefinition = ItemManager.FindItemDefinition(ItemMetalOre);
+            _sulfurOreDefinition = ItemManager.FindItemDefinition(ItemSulfurOre);
+            _hqMetalOreDefinition = ItemManager.FindItemDefinition(ItemHqMetalOre);
         }
 
         private ItemDefinition GetCachedItemDefinition(string shortname)
@@ -198,16 +240,16 @@ namespace Oxide.Plugins
 
             switch (shortname)
             {
-                case "charcoal": return _charcoalDefinition;
-                case "wood": return _woodDefinition;
-                case "lowgradefuel": return _lowGradeFuelDefinition;
-                case "metal.fragments": return _metalFragmentsDefinition;
-                case "sulfur": return _sulfurDefinition;
-                case "metal.refined": return _metalRefinedDefinition;
-                case "crude.oil": return _crudeOilDefinition;
-                case "metal.ore": return _metalOreDefinition;
-                case "sulfur.ore": return _sulfurOreDefinition;
-                case "hq.metal.ore": return _hqMetalOreDefinition;
+                case ItemCharcoal: return _charcoalDefinition;
+                case ItemWood: return _woodDefinition;
+                case ItemLowGradeFuel: return _lowGradeFuelDefinition;
+                case ItemMetalFragments: return _metalFragmentsDefinition;
+                case ItemSulfur: return _sulfurDefinition;
+                case ItemMetalRefined: return _metalRefinedDefinition;
+                case ItemCrudeOil: return _crudeOilDefinition;
+                case ItemMetalOre: return _metalOreDefinition;
+                case ItemSulfurOre: return _sulfurOreDefinition;
+                case ItemHqMetalOre: return _hqMetalOreDefinition;
                 default: return ItemManager.FindItemDefinition(shortname);
             }
         }
@@ -222,9 +264,11 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            if (_config.ConfigVersion != 1)
+            // Version 2 introduced ReducedWoodCostEnabled / WoodCostScale; bumping the version
+            // forces a save so the new keys appear in existing config files.
+            if (_config.ConfigVersion != 2)
             {
-                _config.ConfigVersion = 1;
+                _config.ConfigVersion = 2;
                 changed = true;
             }
 
@@ -245,58 +289,48 @@ namespace Oxide.Plugins
                 changed = true;
             }
 
-            var p = (_config.Preset ?? "10x").Trim();
-            if (p.Length == 0) p = "10x";
-            p = p.ToLowerInvariant();
+            if (_config.WoodCostScale < 0f) { _config.WoodCostScale = 0f; changed = true; }
+            else if (_config.WoodCostScale > 1f) { _config.WoodCostScale = 1f; changed = true; }
 
-            if (p == "2") p = "2x";
-            if (p == "3") p = "3x";
-            if (p == "5") p = "5x";
-            if (p == "10") p = "10x";
-            if (p == "25") p = "25x";
-            if (p == "50") p = "50x";
-            if (p == "100") p = "100x";
-            if (p == "1000") p = "1000x";
-            if (p == "inst" || p == "instant") p = "instant";
-
-            if (p != "2x" && p != "3x" && p != "5x" && p != "10x" && p != "25x" && p != "50x" && p != "100x" && p != "1000x" && p != "instant")
+            var presetKey = ResolvePresetKey(_config.Preset);
+            if (!PresetDefinitions.ContainsKey(presetKey))
             {
-                PrintWarning($"Unknown Preset '{_config.Preset}', defaulting to 10x.");
-                p = "10x";
+                PrintWarning($"Unknown Preset '{_config.Preset}', defaulting to {DefaultPresetKey}.");
+                presetKey = DefaultPresetKey;
                 changed = true;
             }
 
-            if (!string.Equals(_config.Preset, p, StringComparison.Ordinal))
+            if (!string.Equals(_config.Preset, presetKey, StringComparison.Ordinal))
             {
-                _config.Preset = p;
+                _config.Preset = presetKey;
                 changed = true;
             }
 
-if (_config.AveragePopulation < 0) { _config.AveragePopulation = 0; changed = true; }
-if (_config.AveragePopulation > 5000) { _config.AveragePopulation = 5000; changed = true; }
+            if (_config.AveragePopulation < 0) { _config.AveragePopulation = 0; changed = true; }
+            if (_config.AveragePopulation > 5000) { _config.AveragePopulation = 5000; changed = true; }
 
-var bias = (_config.AutoTuneBias ?? "Balanced").Trim();
-if (bias.Length == 0) bias = "Balanced";
+            var bias = (_config.AutoTuneBias ?? "Balanced").Trim();
+            if (bias.Length == 0) bias = "Balanced";
 
-if (bias.Equals("balanced", StringComparison.OrdinalIgnoreCase)) bias = "Balanced";
-else if (bias.Equals("performance", StringComparison.OrdinalIgnoreCase)) bias = "Performance";
-else if (bias.Equals("responsiveness", StringComparison.OrdinalIgnoreCase)) bias = "Responsiveness";
-else
-{
-    PrintWarning($"Unknown AutoTuneBias '{_config.AutoTuneBias}', defaulting to Balanced.");
-    bias = "Balanced";
-    changed = true;
-}
+            if (bias.Equals("balanced", StringComparison.OrdinalIgnoreCase)) bias = "Balanced";
+            else if (bias.Equals("performance", StringComparison.OrdinalIgnoreCase)) bias = "Performance";
+            else if (bias.Equals("responsiveness", StringComparison.OrdinalIgnoreCase)) bias = "Responsiveness";
+            else
+            {
+                PrintWarning($"Unknown AutoTuneBias '{_config.AutoTuneBias}', defaulting to Balanced.");
+                bias = "Balanced";
+                changed = true;
+            }
 
-if (!string.Equals(_config.AutoTuneBias, bias, StringComparison.Ordinal))
-{
-    _config.AutoTuneBias = bias;
-    changed = true;
-}
+            if (!string.Equals(_config.AutoTuneBias, bias, StringComparison.Ordinal))
+            {
+                _config.AutoTuneBias = bias;
+                changed = true;
+            }
 
             if (_config.OvenWhitelist == null)
             {
-                _config.OvenWhitelist = new List<string> { "furnace", "furnace.large", "refinery", "electric.furnace" };
+                _config.OvenWhitelist = new List<string>(DefaultOvenWhitelist);
                 changed = true;
             }
             else
@@ -311,7 +345,7 @@ if (!string.Equals(_config.AutoTuneBias, bias, StringComparison.Ordinal))
                 }
 
                 if (cleaned.Count == 0)
-                    cleaned.AddRange(new[] { "furnace", "furnace.large", "refinery", "electric.furnace" });
+                    cleaned.AddRange(DefaultOvenWhitelist);
 
                 if (cleaned.Count != _config.OvenWhitelist.Count)
                     changed = true;
@@ -336,186 +370,186 @@ if (!string.Equals(_config.AutoTuneBias, bias, StringComparison.Ordinal))
             return changed;
         }
 
-private bool _effAdaptiveScaling;
-private int _effAdaptiveMinOvensPerTick;
-private int _effAdaptiveMaxOvensPerTick;
-private bool _effDynamicTickInterval;
-private float _effDynamicMinGlobalLoopInterval;
-private float _effDynamicMaxGlobalLoopInterval;
-private int _effDynamicLowOvenCount;
-private int _effDynamicHighOvenCount;
-private float _effFixedGlobalLoopInterval;
-private readonly HashSet<ulong> _pendingFuelRecalc = new HashSet<ulong>();
-private readonly Dictionary<ulong, bool> _pendingAutomationToggleStates = new Dictionary<ulong, bool>();
-private void RefreshEffectiveScheduling(bool allowWriteToConfig)
-{
-    if (_config == null) return;
-
-    _effAdaptiveScaling = _config.AdaptiveScaling;
-    _effAdaptiveMinOvensPerTick = _config.AdaptiveMinOvensPerTick;
-    _effAdaptiveMaxOvensPerTick = _config.AdaptiveMaxOvensPerTick;
-
-    _effDynamicTickInterval = _config.DynamicTickInterval;
-    _effDynamicMinGlobalLoopInterval = _config.DynamicMinGlobalLoopInterval;
-    _effDynamicMaxGlobalLoopInterval = _config.DynamicMaxGlobalLoopInterval;
-    _effDynamicLowOvenCount = _config.DynamicLowOvenCount;
-    _effDynamicHighOvenCount = _config.DynamicHighOvenCount;
-
-    _effFixedGlobalLoopInterval = _config.FixedGlobalLoopInterval;
-
-    if (!_config.AutoTuneEnabled)
-        return;
-
-    int pop = Mathf.Clamp(_config.AveragePopulation, 0, 5000);
-    int[] anchors = { 10, 25, 50, 100, 200, 300, 400, 500 };
-    int anchor = anchors[0];
-    int bestDist = Math.Abs(pop - anchor);
-    for (int i = 1; i < anchors.Length; i++)
-    {
-        int d = Math.Abs(pop - anchors[i]);
-        if (d < bestDist) { bestDist = d; anchor = anchors[i]; }
-    }
-
-    int baseMin;
-    int baseMax;
-    float baseMinInterval;
-    float baseMaxInterval;
-    int baseLowCount;
-    int baseHighCount;
-    float baseFixed;
-
-    switch (anchor)
-    {
-        case 10:
-            baseMin = 300; baseMax = 900; baseMinInterval = 0.05f; baseMaxInterval = 0.15f; baseLowCount = 50; baseHighCount = 300; baseFixed = 0.15f;
-            break;
-        case 25:
-            baseMin = 250; baseMax = 900; baseMinInterval = 0.07f; baseMaxInterval = 0.18f; baseLowCount = 75; baseHighCount = 400; baseFixed = 0.18f;
-            break;
-        case 50:
-            baseMin = 200; baseMax = 800; baseMinInterval = 0.10f; baseMaxInterval = 0.22f; baseLowCount = 100; baseHighCount = 600; baseFixed = 0.22f;
-            break;
-        case 100:
-            baseMin = 160; baseMax = 700; baseMinInterval = 0.12f; baseMaxInterval = 0.25f; baseLowCount = 150; baseHighCount = 900; baseFixed = 0.25f;
-            break;
-        case 200:
-            baseMin = 140; baseMax = 650; baseMinInterval = 0.14f; baseMaxInterval = 0.28f; baseLowCount = 200; baseHighCount = 1100; baseFixed = 0.28f;
-            break;
-        case 300:
-            baseMin = 120; baseMax = 600; baseMinInterval = 0.15f; baseMaxInterval = 0.32f; baseLowCount = 250; baseHighCount = 1300; baseFixed = 0.32f;
-            break;
-        case 400:
-            baseMin = 110; baseMax = 550; baseMinInterval = 0.16f; baseMaxInterval = 0.35f; baseLowCount = 300; baseHighCount = 1500; baseFixed = 0.35f;
-            break;
-        default:
-            baseMin = 100; baseMax = 500; baseMinInterval = 0.18f; baseMaxInterval = 0.40f; baseLowCount = 350; baseHighCount = 1700; baseFixed = 0.40f;
-            break;
-    }
-
-    float ovensFactor = 1.0f;
-    float intervalFactor = 1.0f;
-
-    switch ((_config.Preset ?? "10x").ToLowerInvariant())
-    {
-        case "2x": ovensFactor = 1.15f; intervalFactor = 0.90f; break;
-        case "3x": ovensFactor = 1.10f; intervalFactor = 0.92f; break;
-        case "5x": ovensFactor = 1.05f; intervalFactor = 0.95f; break;
-        case "10x": ovensFactor = 1.00f; intervalFactor = 1.00f; break;
-        case "25x": ovensFactor = 0.85f; intervalFactor = 1.10f; break;
-        case "50x": ovensFactor = 0.75f; intervalFactor = 1.20f; break;
-        case "100x": ovensFactor = 0.65f; intervalFactor = 1.30f; break;
-        case "1000x": ovensFactor = 0.45f; intervalFactor = 1.60f; break;
-        case "instant": ovensFactor = 0.35f; intervalFactor = 1.80f; break;
-    }
-
-    string bias = (_config.AutoTuneBias ?? "Balanced").Trim();
-    if (bias.Equals("Responsiveness", StringComparison.OrdinalIgnoreCase))
-    {
-        ovensFactor *= 1.10f;
-        intervalFactor *= 0.90f;
-    }
-    else if (bias.Equals("Performance", StringComparison.OrdinalIgnoreCase))
-    {
-        ovensFactor *= 0.90f;
-        intervalFactor *= 1.10f;
-    }
-
-    int tunedMin = Mathf.Clamp(Mathf.RoundToInt(baseMin * ovensFactor), 25, 5000);
-    int tunedMax = Mathf.Clamp(Mathf.RoundToInt(baseMax * ovensFactor), tunedMin, 10000);
-
-    float tunedMinInterval = Mathf.Clamp(baseMinInterval * intervalFactor, 0.03f, 2f);
-    float tunedMaxInterval = Mathf.Clamp(baseMaxInterval * intervalFactor, tunedMinInterval, 2f);
-    float tunedFixed = Mathf.Clamp(baseFixed * intervalFactor, 0.03f, 2f);
-
-    _effAdaptiveScaling = true;
-    _effAdaptiveMinOvensPerTick = tunedMin;
-    _effAdaptiveMaxOvensPerTick = tunedMax;
-    _effDynamicTickInterval = true;
-    _effDynamicMinGlobalLoopInterval = tunedMinInterval;
-    _effDynamicMaxGlobalLoopInterval = tunedMaxInterval;
-    _effDynamicLowOvenCount = baseLowCount;
-    _effDynamicHighOvenCount = baseHighCount;
-    _effFixedGlobalLoopInterval = tunedFixed;
-
-    if (!allowWriteToConfig || !_config.AutoTuneWriteToConfig)
-        return;
-
-    bool changed = false;
-    if (_config.AdaptiveScaling != _effAdaptiveScaling) { _config.AdaptiveScaling = _effAdaptiveScaling; changed = true; }
-    if (_config.AdaptiveMinOvensPerTick != _effAdaptiveMinOvensPerTick) { _config.AdaptiveMinOvensPerTick = _effAdaptiveMinOvensPerTick; changed = true; }
-    if (_config.AdaptiveMaxOvensPerTick != _effAdaptiveMaxOvensPerTick) { _config.AdaptiveMaxOvensPerTick = _effAdaptiveMaxOvensPerTick; changed = true; }
-
-    if (_config.DynamicTickInterval != _effDynamicTickInterval) { _config.DynamicTickInterval = _effDynamicTickInterval; changed = true; }
-    if (!Mathf.Approximately(_config.DynamicMinGlobalLoopInterval, _effDynamicMinGlobalLoopInterval)) { _config.DynamicMinGlobalLoopInterval = _effDynamicMinGlobalLoopInterval; changed = true; }
-    if (!Mathf.Approximately(_config.DynamicMaxGlobalLoopInterval, _effDynamicMaxGlobalLoopInterval)) { _config.DynamicMaxGlobalLoopInterval = _effDynamicMaxGlobalLoopInterval; changed = true; }
-    if (_config.DynamicLowOvenCount != _effDynamicLowOvenCount) { _config.DynamicLowOvenCount = _effDynamicLowOvenCount; changed = true; }
-    if (_config.DynamicHighOvenCount != _effDynamicHighOvenCount) { _config.DynamicHighOvenCount = _effDynamicHighOvenCount; changed = true; }
-
-    if (!Mathf.Approximately(_config.FixedGlobalLoopInterval, _effFixedGlobalLoopInterval)) { _config.FixedGlobalLoopInterval = _effFixedGlobalLoopInterval; changed = true; }
-
-    if (changed)
-        SaveConfig();
-
-    RefreshCachedPreset();
-}
-
-private void QueueFuelRecalcNextTick(BaseOven oven, BasePlayer player)
-{
-    if (!_config.Enabled) return;
-    if (!_config.AutoPullFuelFromPlayer) return;
-    if (oven == null || oven.IsDestroyed) return;
-    if (player == null || !player.IsConnected) return;
-
-    ulong id = 0ul;
-    if (oven.net != null)
-        id = oven.net.ID.Value;
-
-    if (id == 0ul)
-    {
-        NextTick(() =>
+        private bool _effAdaptiveScaling;
+        private int _effAdaptiveMinOvensPerTick;
+        private int _effAdaptiveMaxOvensPerTick;
+        private bool _effDynamicTickInterval;
+        private float _effDynamicMinGlobalLoopInterval;
+        private float _effDynamicMaxGlobalLoopInterval;
+        private int _effDynamicLowOvenCount;
+        private int _effDynamicHighOvenCount;
+        private float _effFixedGlobalLoopInterval;
+        private readonly HashSet<ulong> _pendingFuelRecalc = new HashSet<ulong>();
+        private readonly Dictionary<ulong, bool> _pendingAutomationToggleStates = new Dictionary<ulong, bool>();
+        private void RefreshEffectiveScheduling(bool allowWriteToConfig)
         {
-            if (oven == null || oven.IsDestroyed) return;
-            if (player == null || !player.IsConnected) return;
-            TryAutoPullFuel(oven, player);
-        });
-        return;
-    }
+            if (_config == null) return;
 
-    if (_pendingFuelRecalc.Add(id))
-    {
-        NextTick(() =>
+            _effAdaptiveScaling = _config.AdaptiveScaling;
+            _effAdaptiveMinOvensPerTick = _config.AdaptiveMinOvensPerTick;
+            _effAdaptiveMaxOvensPerTick = _config.AdaptiveMaxOvensPerTick;
+
+            _effDynamicTickInterval = _config.DynamicTickInterval;
+            _effDynamicMinGlobalLoopInterval = _config.DynamicMinGlobalLoopInterval;
+            _effDynamicMaxGlobalLoopInterval = _config.DynamicMaxGlobalLoopInterval;
+            _effDynamicLowOvenCount = _config.DynamicLowOvenCount;
+            _effDynamicHighOvenCount = _config.DynamicHighOvenCount;
+
+            _effFixedGlobalLoopInterval = _config.FixedGlobalLoopInterval;
+
+            if (!_config.AutoTuneEnabled)
+                return;
+
+            int pop = Mathf.Clamp(_config.AveragePopulation, 0, 5000);
+            int[] anchors = { 10, 25, 50, 100, 200, 300, 400, 500 };
+            int anchor = anchors[0];
+            int bestDist = Math.Abs(pop - anchor);
+            for (int i = 1; i < anchors.Length; i++)
+            {
+                int d = Math.Abs(pop - anchors[i]);
+                if (d < bestDist) { bestDist = d; anchor = anchors[i]; }
+            }
+
+            int baseMin;
+            int baseMax;
+            float baseMinInterval;
+            float baseMaxInterval;
+            int baseLowCount;
+            int baseHighCount;
+            float baseFixed;
+
+            switch (anchor)
+            {
+                case 10:
+                    baseMin = 300; baseMax = 900; baseMinInterval = 0.05f; baseMaxInterval = 0.15f; baseLowCount = 50; baseHighCount = 300; baseFixed = 0.15f;
+                    break;
+                case 25:
+                    baseMin = 250; baseMax = 900; baseMinInterval = 0.07f; baseMaxInterval = 0.18f; baseLowCount = 75; baseHighCount = 400; baseFixed = 0.18f;
+                    break;
+                case 50:
+                    baseMin = 200; baseMax = 800; baseMinInterval = 0.10f; baseMaxInterval = 0.22f; baseLowCount = 100; baseHighCount = 600; baseFixed = 0.22f;
+                    break;
+                case 100:
+                    baseMin = 160; baseMax = 700; baseMinInterval = 0.12f; baseMaxInterval = 0.25f; baseLowCount = 150; baseHighCount = 900; baseFixed = 0.25f;
+                    break;
+                case 200:
+                    baseMin = 140; baseMax = 650; baseMinInterval = 0.14f; baseMaxInterval = 0.28f; baseLowCount = 200; baseHighCount = 1100; baseFixed = 0.28f;
+                    break;
+                case 300:
+                    baseMin = 120; baseMax = 600; baseMinInterval = 0.15f; baseMaxInterval = 0.32f; baseLowCount = 250; baseHighCount = 1300; baseFixed = 0.32f;
+                    break;
+                case 400:
+                    baseMin = 110; baseMax = 550; baseMinInterval = 0.16f; baseMaxInterval = 0.35f; baseLowCount = 300; baseHighCount = 1500; baseFixed = 0.35f;
+                    break;
+                default:
+                    baseMin = 100; baseMax = 500; baseMinInterval = 0.18f; baseMaxInterval = 0.40f; baseLowCount = 350; baseHighCount = 1700; baseFixed = 0.40f;
+                    break;
+            }
+
+            float ovensFactor = 1.0f;
+            float intervalFactor = 1.0f;
+
+            switch (ResolvePresetKey(_config.Preset))
+            {
+                case "2x": ovensFactor = 1.15f; intervalFactor = 0.90f; break;
+                case "3x": ovensFactor = 1.10f; intervalFactor = 0.92f; break;
+                case "5x": ovensFactor = 1.05f; intervalFactor = 0.95f; break;
+                case "10x": ovensFactor = 1.00f; intervalFactor = 1.00f; break;
+                case "25x": ovensFactor = 0.85f; intervalFactor = 1.10f; break;
+                case "50x": ovensFactor = 0.75f; intervalFactor = 1.20f; break;
+                case "100x": ovensFactor = 0.65f; intervalFactor = 1.30f; break;
+                case "1000x": ovensFactor = 0.45f; intervalFactor = 1.60f; break;
+                case "instant": ovensFactor = 0.35f; intervalFactor = 1.80f; break;
+            }
+
+            string bias = (_config.AutoTuneBias ?? "Balanced").Trim();
+            if (bias.Equals("Responsiveness", StringComparison.OrdinalIgnoreCase))
+            {
+                ovensFactor *= 1.10f;
+                intervalFactor *= 0.90f;
+            }
+            else if (bias.Equals("Performance", StringComparison.OrdinalIgnoreCase))
+            {
+                ovensFactor *= 0.90f;
+                intervalFactor *= 1.10f;
+            }
+
+            int tunedMin = Mathf.Clamp(Mathf.RoundToInt(baseMin * ovensFactor), 25, 5000);
+            int tunedMax = Mathf.Clamp(Mathf.RoundToInt(baseMax * ovensFactor), tunedMin, 10000);
+
+            float tunedMinInterval = Mathf.Clamp(baseMinInterval * intervalFactor, 0.03f, 2f);
+            float tunedMaxInterval = Mathf.Clamp(baseMaxInterval * intervalFactor, tunedMinInterval, 2f);
+            float tunedFixed = Mathf.Clamp(baseFixed * intervalFactor, 0.03f, 2f);
+
+            _effAdaptiveScaling = true;
+            _effAdaptiveMinOvensPerTick = tunedMin;
+            _effAdaptiveMaxOvensPerTick = tunedMax;
+            _effDynamicTickInterval = true;
+            _effDynamicMinGlobalLoopInterval = tunedMinInterval;
+            _effDynamicMaxGlobalLoopInterval = tunedMaxInterval;
+            _effDynamicLowOvenCount = baseLowCount;
+            _effDynamicHighOvenCount = baseHighCount;
+            _effFixedGlobalLoopInterval = tunedFixed;
+
+            if (!allowWriteToConfig || !_config.AutoTuneWriteToConfig)
+                return;
+
+            bool changed = false;
+            if (_config.AdaptiveScaling != _effAdaptiveScaling) { _config.AdaptiveScaling = _effAdaptiveScaling; changed = true; }
+            if (_config.AdaptiveMinOvensPerTick != _effAdaptiveMinOvensPerTick) { _config.AdaptiveMinOvensPerTick = _effAdaptiveMinOvensPerTick; changed = true; }
+            if (_config.AdaptiveMaxOvensPerTick != _effAdaptiveMaxOvensPerTick) { _config.AdaptiveMaxOvensPerTick = _effAdaptiveMaxOvensPerTick; changed = true; }
+
+            if (_config.DynamicTickInterval != _effDynamicTickInterval) { _config.DynamicTickInterval = _effDynamicTickInterval; changed = true; }
+            if (!Mathf.Approximately(_config.DynamicMinGlobalLoopInterval, _effDynamicMinGlobalLoopInterval)) { _config.DynamicMinGlobalLoopInterval = _effDynamicMinGlobalLoopInterval; changed = true; }
+            if (!Mathf.Approximately(_config.DynamicMaxGlobalLoopInterval, _effDynamicMaxGlobalLoopInterval)) { _config.DynamicMaxGlobalLoopInterval = _effDynamicMaxGlobalLoopInterval; changed = true; }
+            if (_config.DynamicLowOvenCount != _effDynamicLowOvenCount) { _config.DynamicLowOvenCount = _effDynamicLowOvenCount; changed = true; }
+            if (_config.DynamicHighOvenCount != _effDynamicHighOvenCount) { _config.DynamicHighOvenCount = _effDynamicHighOvenCount; changed = true; }
+
+            if (!Mathf.Approximately(_config.FixedGlobalLoopInterval, _effFixedGlobalLoopInterval)) { _config.FixedGlobalLoopInterval = _effFixedGlobalLoopInterval; changed = true; }
+
+            if (changed)
+                SaveConfig();
+
+            RefreshCachedPreset();
+        }
+
+        private void QueueFuelRecalcNextTick(BaseOven oven, BasePlayer player)
         {
-            _pendingFuelRecalc.Remove(id);
-
+            if (!_config.Enabled) return;
+            if (!_config.AutoPullFuelFromPlayer) return;
             if (oven == null || oven.IsDestroyed) return;
             if (player == null || !player.IsConnected) return;
 
-            TryAutoPullFuel(oven, player);
-        });
-    }
-}
+            ulong id = 0ul;
+            if (oven.net != null)
+                id = oven.net.ID.Value;
 
-#endregion
+            if (id == 0ul)
+            {
+                NextTick(() =>
+                {
+                    if (oven == null || oven.IsDestroyed) return;
+                    if (player == null || !player.IsConnected) return;
+                    TryAutoPullFuel(oven, player);
+                });
+                return;
+            }
+
+            if (_pendingFuelRecalc.Add(id))
+            {
+                NextTick(() =>
+                {
+                    _pendingFuelRecalc.Remove(id);
+
+                    if (oven == null || oven.IsDestroyed) return;
+                    if (player == null || !player.IsConnected) return;
+
+                    TryAutoPullFuel(oven, player);
+                });
+            }
+        }
+
+        #endregion
 
         #region Presets
 
@@ -524,57 +558,77 @@ private void QueueFuelRecalcNextTick(BaseOven oven, BasePlayer player)
             public float CycleSeconds;
             public int MaxTotalConsumedPerCycle;
             public int MaxConsumedPerStackPerCycle;
+        }
 
-            public float BaselineWoodPerSecond;
+        private struct PresetDefinition
+        {
+            public PresetTuning Tuning;
+            public int Multiplier;
+        }
+
+        private const string DefaultPresetKey = "10x";
+        private const string InstantPresetKey = "instant";
+
+        private static readonly Dictionary<string, string> PresetAliases = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["2"] = "2x",
+            ["3"] = "3x",
+            ["5"] = "5x",
+            ["10"] = "10x",
+            ["25"] = "25x",
+            ["50"] = "50x",
+            ["100"] = "100x",
+            ["1000"] = "1000x",
+            ["inst"] = InstantPresetKey
+        };
+
+        private static readonly Dictionary<string, PresetDefinition> PresetDefinitions = new Dictionary<string, PresetDefinition>(StringComparer.Ordinal)
+        {
+            ["2x"] = MakePreset(0.5f, 20, 10, 2),
+            ["3x"] = MakePreset(0.5f, 30, 15, 3),
+            ["5x"] = MakePreset(0.5f, 50, 25, 5),
+            ["10x"] = MakePreset(0.5f, 100, 50, 10),
+            ["25x"] = MakePreset(0.25f, 500, 250, 25),
+            ["50x"] = MakePreset(0.2f, 1000, 500, 50),
+            ["100x"] = MakePreset(0.1f, 2000, 1000, 100),
+            ["1000x"] = MakePreset(0.05f, 20000, 10000, 1000),
+            [InstantPresetKey] = MakePreset(0.1f, int.MaxValue, int.MaxValue, 1000000)
+        };
+
+        private static PresetDefinition MakePreset(float cycleSeconds, int maxTotalPerCycle, int maxPerStackPerCycle, int multiplier)
+        {
+            return new PresetDefinition
+            {
+                Tuning = new PresetTuning
+                {
+                    CycleSeconds = cycleSeconds,
+                    MaxTotalConsumedPerCycle = maxTotalPerCycle,
+                    MaxConsumedPerStackPerCycle = maxPerStackPerCycle
+                },
+                Multiplier = multiplier
+            };
+        }
+
+        private static string ResolvePresetKey(string preset)
+        {
+            var key = (preset ?? DefaultPresetKey).Trim().ToLowerInvariant();
+            if (key.Length == 0) key = DefaultPresetKey;
+            if (PresetAliases.TryGetValue(key, out var canonical)) key = canonical;
+            return key;
         }
 
         private PresetTuning GetPreset(string preset)
         {
-
-            const float baselineWoodSmall = 0.5f;
-            const float baselineWoodLarge = 1.0f;
-            const float baselineWoodOther = 0.5f;
-
-            switch ((preset ?? "10x").ToLowerInvariant())
-            {
-                case "2x":
-                    return new PresetTuning { CycleSeconds = 0.5f, MaxTotalConsumedPerCycle = 20, MaxConsumedPerStackPerCycle = 10, BaselineWoodPerSecond = baselineWoodOther };
-                case "3x":
-                    return new PresetTuning { CycleSeconds = 0.5f, MaxTotalConsumedPerCycle = 30, MaxConsumedPerStackPerCycle = 15, BaselineWoodPerSecond = baselineWoodOther };
-                case "5x":
-                    return new PresetTuning { CycleSeconds = 0.5f, MaxTotalConsumedPerCycle = 50, MaxConsumedPerStackPerCycle = 25, BaselineWoodPerSecond = baselineWoodOther };
-                case "10x":
-                    return new PresetTuning { CycleSeconds = 0.5f, MaxTotalConsumedPerCycle = 100, MaxConsumedPerStackPerCycle = 50, BaselineWoodPerSecond = baselineWoodOther };
-case "25x":
-                    return new PresetTuning { CycleSeconds = 0.25f, MaxTotalConsumedPerCycle = 500, MaxConsumedPerStackPerCycle = 250, BaselineWoodPerSecond = baselineWoodOther };
-case "50x":
-                    return new PresetTuning { CycleSeconds = 0.2f, MaxTotalConsumedPerCycle = 1000, MaxConsumedPerStackPerCycle = 500, BaselineWoodPerSecond = baselineWoodOther };
-case "instant":
-                    return new PresetTuning { CycleSeconds = 0.1f, MaxTotalConsumedPerCycle = int.MaxValue, MaxConsumedPerStackPerCycle = int.MaxValue, BaselineWoodPerSecond = baselineWoodOther };
-                case "100x":
-                    return new PresetTuning { CycleSeconds = 0.1f, MaxTotalConsumedPerCycle = 2000, MaxConsumedPerStackPerCycle = 1000, BaselineWoodPerSecond = baselineWoodOther };
-                case "1000x":
-                    return new PresetTuning { CycleSeconds = 0.05f, MaxTotalConsumedPerCycle = 20000, MaxConsumedPerStackPerCycle = 10000, BaselineWoodPerSecond = baselineWoodOther };
-                default:
-                    return new PresetTuning { CycleSeconds = 0.5f, MaxTotalConsumedPerCycle = 100, MaxConsumedPerStackPerCycle = 50, BaselineWoodPerSecond = baselineWoodOther };
-            }
+            return PresetDefinitions.TryGetValue(ResolvePresetKey(preset), out var def)
+                ? def.Tuning
+                : PresetDefinitions[DefaultPresetKey].Tuning;
         }
 
         private int GetMultiplier(string preset)
         {
-            switch ((preset ?? "10x").ToLowerInvariant())
-            {
-                case "2x": return 2;
-                case "3x": return 3;
-                case "5x": return 5;
-                case "10x": return 10;
-                case "25x": return 25;
-                case "50x": return 50;
-                case "instant": return 1000000;
-                case "100x": return 100;
-                case "1000x": return 1000;
-                default: return 10;
-            }
+            return PresetDefinitions.TryGetValue(ResolvePresetKey(preset), out var def)
+                ? def.Multiplier
+                : PresetDefinitions[DefaultPresetKey].Multiplier;
         }
 
         private string _cachedPresetKey = null;
@@ -584,17 +638,15 @@ case "instant":
 
         private void RefreshCachedPreset()
         {
-
-            string preset = (_config?.Preset ?? "10x").Trim();
-            string key = preset.ToLowerInvariant();
+            string key = ResolvePresetKey(_config?.Preset);
 
             if (key == _cachedPresetKey)
                 return;
 
             _cachedPresetKey = key;
-            _cachedPresetTuning = GetPreset(preset);
-            _cachedPresetMultiplier = GetMultiplier(preset);
-            _cachedIsInstantPreset = string.Equals(key, "instant", StringComparison.Ordinal);
+            _cachedPresetTuning = GetPreset(key);
+            _cachedPresetMultiplier = GetMultiplier(key);
+            _cachedIsInstantPreset = string.Equals(key, InstantPresetKey, StringComparison.Ordinal);
         }
 
         private PresetTuning GetEffectivePresetForKind(PresetTuning basePreset, OvenKind kind)
@@ -642,6 +694,7 @@ case "instant":
 
         private float _currentGlobalLoopInterval = 0.25f;
         private bool _rescheduleQueued;
+        private float _queuedRescheduleInterval = DefaultGlobalLoopInterval;
 
         private readonly List<ulong> _tmpTrackerIds = new List<ulong>(256);
         private readonly Stack<List<Item>> _itemListPool = new Stack<List<Item>>();
@@ -700,6 +753,10 @@ case "instant":
             if (Mathf.Abs(_currentGlobalLoopInterval - interval) < TimerRescheduleThreshold)
                 return;
 
+            // Always remember the latest requested interval so a queued reschedule uses it
+            // instead of the value captured when the reschedule was first queued.
+            _queuedRescheduleInterval = interval;
+
             if (_rescheduleQueued)
                 return;
 
@@ -709,7 +766,7 @@ case "instant":
                 _rescheduleQueued = false;
                 _globalTimer?.Destroy();
                 _globalTimer = null;
-                _currentGlobalLoopInterval = interval;
+                _currentGlobalLoopInterval = Mathf.Clamp(_queuedRescheduleInterval, MinGlobalLoopInterval, MaxGlobalLoopInterval);
                 _globalTimer = timer.Every(_currentGlobalLoopInterval, GlobalTick);
             });
         }
@@ -717,58 +774,56 @@ case "instant":
         private const string PermAdmin = "smartsmelt.admin";
         private const string PermDebug = "smartsmelt.debug";
 
-private class OvenTracker
-{
-    public BaseOven Oven;
-    public OvenKind Kind;
-    public bool GateOnWood;
-    public float NextTickAt;
-    public int Cycles;
-    public int OffCycles;
-    public float CharcoalRemainder;
-    public float FuelDebt;
-    public float LastBalanceTime;
-    public readonly List<Item> InputsBuffer = new List<Item>(8);
-}
+        private class OvenTracker
+        {
+            public BaseOven Oven;
+            public OvenKind Kind;
+            public bool GateOnWood;
+            public float NextTickAt;
+            public int Cycles;
+            public int OffCycles;
+            public float CharcoalRemainder;
+            public float FuelDebt;
+            public float LastBalanceTime;
+            public readonly List<Item> InputsBuffer = new List<Item>(8);
+        }
 
         #endregion
 
         #region Hooks
 
-private void OnServerInitialized()
-{
-    RefreshEffectiveScheduling(allowWriteToConfig: true);
+        private void OnServerInitialized()
+        {
+            // ItemManager is fully initialized at this point. Rebuild cached definitions so
+            // a very early config load cannot leave the runtime with unresolved item entries.
+            RebuildRuntimeCaches();
+            RefreshEffectiveScheduling(allowWriteToConfig: true);
 
-    _active.Clear();
-    _cachedOvenPrefabNamesLower.Clear();
-    MarkActiveChanged();
-    permission.RegisterPermission(PermAdmin, this);
-    permission.RegisterPermission(PermDebug, this);
-    _globalTimer?.Destroy();
-    _globalTimer = null;
-    EnsureGlobalTimer(ComputeGlobalLoopInterval(0));
-    timer.Once(1f, ScanAndTrackRunningOvens);
-}
+            _active.Clear();
+            _cachedOvenPrefabNamesLower.Clear();
+            MarkActiveChanged();
+            permission.RegisterPermission(PermAdmin, this);
+            permission.RegisterPermission(PermDebug, this);
+            _globalTimer?.Destroy();
+            _globalTimer = null;
+            EnsureGlobalTimer(ComputeGlobalLoopInterval(0));
+            timer.Once(1f, ScanAndTrackRunningOvens);
+        }
 
-private void Unload()
-{
-    _globalTimer?.Destroy();
-    _globalTimer = null;
-    DisposeStartupScanEnumerator();
-    _active.Clear();
-    _cachedOvenPrefabNamesLower.Clear();
-    MarkActiveChanged();
-}
+        private void Unload()
+        {
+            _globalTimer?.Destroy();
+            _globalTimer = null;
+            DisposeStartupScanEnumerator();
+            _active.Clear();
+            _cachedOvenPrefabNamesLower.Clear();
+            MarkActiveChanged();
+        }
         private void OnEntityKill(BaseNetworkable ent)
         {
             var oven = ent as BaseOven;
             if (oven == null) return;
             StopTracking(oven);
-        }
-
-        private void OnOvenToggle(BaseOven oven)
-        {
-            OnOvenToggle(oven, null);
         }
 
         private void OnOvenToggle(BaseOven oven, BasePlayer player)
@@ -811,71 +866,68 @@ private void Unload()
             });
         }
 
-private void OnEntityFlagsChanged(BaseEntity entity, BaseEntity.Flags oldFlags, BaseEntity.Flags newFlags)
-{
-    if (!_config.Enabled || entity == null) return;
-    bool oldOn = (oldFlags & BaseEntity.Flags.On) != 0;
-    bool newOn = (newFlags & BaseEntity.Flags.On) != 0;
-    if (oldOn == newOn) return;
-
-    HandleAutomationOvenToggle(entity, newOn);
-}
-private void HandleAutomationOvenToggle(BaseEntity entity, bool newOnState)
-{
-    var oven = entity as BaseOven;
-    if (oven == null) return;
-    if (!IsWhitelistedSmeltingOven(oven)) return;
-    ulong id = oven.net != null ? oven.net.ID.Value : 0ul;
-    if (id == 0ul)
-    {
-        NextTick(() =>
+        private void OnEntityFlagsChanged(BaseEntity entity, BaseEntity.Flags oldFlags, BaseEntity.Flags newFlags)
         {
-            if (oven == null || oven.IsDestroyed) return;
+            if (!_config.Enabled || entity == null) return;
+            bool oldOn = (oldFlags & BaseEntity.Flags.On) != 0;
+            bool newOn = (newFlags & BaseEntity.Flags.On) != 0;
+            if (oldOn == newOn) return;
 
-            if (newOnState && oven.IsOn())
-                StartTracking(oven);
-            else if (!newOnState && !oven.IsOn())
-                StopTracking(oven);
-        });
-        return;
-    }
+            HandleAutomationOvenToggle(entity, newOn);
+        }
+        private void HandleAutomationOvenToggle(BaseEntity entity, bool newOnState)
+        {
+            var oven = entity as BaseOven;
+            if (oven == null) return;
+            if (!IsWhitelistedSmeltingOven(oven)) return;
+            ulong id = oven.net != null ? oven.net.ID.Value : 0ul;
+            if (id == 0ul)
+            {
+                NextTick(() =>
+                {
+                    if (oven == null || oven.IsDestroyed) return;
 
-    if (_pendingAutomationToggleStates.ContainsKey(id))
-    {
-        _pendingAutomationToggleStates[id] = newOnState;
-        return;
-    }
-    _pendingAutomationToggleStates[id] = newOnState;
-    NextTick(() =>
-    {
-        if (!_pendingAutomationToggleStates.TryGetValue(id, out var desiredState))
-            return;
+                    if (newOnState && oven.IsOn())
+                        StartTracking(oven);
+                    else if (!newOnState && !oven.IsOn())
+                        StopTracking(oven);
+                });
+                return;
+            }
 
-        _pendingAutomationToggleStates.Remove(id);
+            if (_pendingAutomationToggleStates.ContainsKey(id))
+            {
+                _pendingAutomationToggleStates[id] = newOnState;
+                return;
+            }
+            _pendingAutomationToggleStates[id] = newOnState;
+            NextTick(() =>
+            {
+                if (!_pendingAutomationToggleStates.TryGetValue(id, out var desiredState))
+                    return;
 
-        if (oven == null || oven.IsDestroyed) return;
+                _pendingAutomationToggleStates.Remove(id);
 
-        if (desiredState && oven.IsOn())
+                if (oven == null || oven.IsDestroyed) return;
+
+                if (desiredState && oven.IsOn())
+                    StartTracking(oven);
+                else if (!desiredState && !oven.IsOn())
+                    StopTracking(oven);
+            });
+        }
+        private void OnOvenCook(BaseOven oven)
+        {
+            EnsureTrackedFromCook(oven);
+        }
+
+        private void EnsureTrackedFromCook(BaseOven oven)
+        {
+            if (!_config.Enabled || oven == null || oven.IsDestroyed) return;
+            if (!oven.IsOn()) return;
+            if (!IsWhitelistedSmeltingOven(oven)) return;
             StartTracking(oven);
-        else if (!desiredState && !oven.IsOn())
-            StopTracking(oven);
-    });
-}
-private void OnOvenCook(BaseOven oven)
-{
-    EnsureTrackedFromCook(oven);
-}
-private void OnOvenCook(BaseOven oven, Item fuel, ItemModBurnable burnable)
-{
-    EnsureTrackedFromCook(oven);
-}
-private void EnsureTrackedFromCook(BaseOven oven)
-{
-    if (!_config.Enabled || oven == null || oven.IsDestroyed) return;
-    if (!oven.IsOn()) return;
-    if (!IsWhitelistedSmeltingOven(oven)) return;
-    StartTracking(oven);
-}
+        }
         #region Commands
         [ChatCommand("ss.debug")]
         private void CmdSmartSmeltDebug(BasePlayer player, string command, string[] args)
@@ -918,23 +970,38 @@ private void EnsureTrackedFromCook(BaseOven oven)
         private void CmdSmartSmeltInfo(BasePlayer player, string command, string[] args)
         {
             if (player == null) return;
+
+            if (!permission.UserHasPermission(player.UserIDString, PermDebug))
+            {
+                player.ChatMessage(Msg("NoPermission", player.UserIDString));
+                return;
+            }
+
             var desiredInterval = ComputeGlobalLoopInterval(_active.Count);
             var cap = GetOvensPerGlobalTickCap(_active.Count);
 
-            SendReply(player, string.Format(Msg("InfoLine1", player.UserIDString), Version, _config.Preset, _config.Enabled, _config.EnableOreSplitting, _config.AutoPullFuelFromPlayer, _config.AutoPullFuelBufferPercent));
+            SendReply(player, string.Format(Msg("InfoLine1", player.UserIDString), Version, _config.Preset, _config.Enabled, _config.EnableOreSplitting, _config.AutoPullFuelFromPlayer, _config.AutoPullFuelBufferPercent, GetWoodCostScale()));
             SendReply(player, string.Format(Msg("InfoLine2", player.UserIDString), _config.AutoTuneEnabled, _config.AveragePopulation, _config.AutoTuneBias, _config.AutoTuneWriteToConfig));
             SendReply(player, string.Format(Msg("InfoLine3", player.UserIDString), _active.Count, cap, _effAdaptiveScaling, _currentGlobalLoopInterval, desiredInterval, _effDynamicTickInterval));
         }
+
         [ConsoleCommand("ss.info")]
         private void ConsoleSmartSmeltInfo(ConsoleSystem.Arg arg)
         {
+            var player = arg.Player();
+            if (player != null && !permission.UserHasPermission(player.UserIDString, PermDebug))
+            {
+                arg.ReplyWith(Msg("NoPermission", player.UserIDString));
+                return;
+            }
+
             var desiredInterval = ComputeGlobalLoopInterval(_active.Count);
             var cap = GetOvensPerGlobalTickCap(_active.Count);
 
-            arg.ReplyWith(string.Format(Msg("ConsoleInfo"), Version, _config.Preset, _config.Enabled, _config.AutoPullFuelFromPlayer, _config.AutoPullFuelBufferPercent, _active.Count, cap, _effAdaptiveScaling, _currentGlobalLoopInterval, desiredInterval, _effDynamicTickInterval));
+            arg.ReplyWith(string.Format(Msg("ConsoleInfo"), Version, _config.Preset, _config.Enabled, _config.AutoPullFuelFromPlayer, _config.AutoPullFuelBufferPercent, _active.Count, cap, _effAdaptiveScaling, _currentGlobalLoopInterval, desiredInterval, _effDynamicTickInterval, GetWoodCostScale()));
         }
 
-[ChatCommand("smeltstats")]
+        [ChatCommand("smeltstats")]
         private void CmdSmeltStats(BasePlayer player, string command, string[] args)
         {
 
@@ -950,694 +1017,682 @@ private void EnsureTrackedFromCook(BaseOven oven)
 
         #endregion
 
-object CanMoveItem(Item item, PlayerInventory inventory, ItemContainerId targetContainerId, int targetSlotIndex, int splitAmount)
-{
-    try
-    {
-        if (!_config.Enabled) return null;
-        if (item?.info == null || inventory == null) return null;
-
-        var player = inventory.GetComponent<BasePlayer>();
-        if (player == null) return null;
-
-        var oven = inventory.loot?.entitySource as BaseOven;
-        if (oven == null || oven.IsDestroyed) return null;
-        if (!IsWhitelistedSmeltingOven(oven)) return null;
-
-        var kind = GetKind(oven);
-        if (kind == OvenKind.Unknown) return null;
-
-        var targetContainer = inventory.FindContainer(targetContainerId);
-        if (targetContainer != null && !(targetContainer.entityOwner is BaseOven)) return null;
-
-        var original = item.GetRootContainer();
-        if (original == null || (original.entityOwner is BaseOven)) return null;
-
-        string sn = item.info.shortname;
-
-        if (kind == OvenKind.SmallRefinery)
+        private object HandleOvenInsertion(BaseOven oven, Item item, int amount, BasePlayer player)
         {
-            if (sn != "crude.oil") return null;
-            return HandleRefineryCrudeInsertion(oven, item, splitAmount, player);
-        }
+            var kind = GetKind(oven);
+            if (kind == OvenKind.Unknown) return null;
 
-        if (sn != "metal.ore" && sn != "sulfur.ore" && sn != "hq.metal.ore") return null;
+            string sn = item.info.shortname;
 
-        if (!_config.EnableOreSplitting)
-        {
-            QueueFuelRecalcNextTick(oven, player);
-            return null;
-        }
-
-        return DistributeOreIntoInputSlots(oven, item, splitAmount, player);
-    }
-    catch (Exception ex)
-    {
-        if (_config != null && _config.Debug)
-            PrintWarning($"CanMoveItem(ItemContainerId) exception: {ex}");
-        return null;
-    }
-}
-
-private void TryAutoPullFuel(BaseOven oven, BasePlayer player)
-{
-    if (!_config.Enabled) return;
-    if (!_config.AutoPullFuelFromPlayer) return;
-    if (oven == null || oven.IsDestroyed) return;
-    if (player == null || !player.IsConnected) return;
-
-    var kind = GetKind(oven);
-    string fuelShortname = GetFuelShortname(kind);
-    if (string.IsNullOrEmpty(fuelShortname)) return;
-
-    var container = oven.inventory;
-    if (container == null) return;
-
-    int requiredFuel = CalculateRequiredFuelForCurrentInput(oven, kind);
-    if (requiredFuel > 0)
-    {
-        float pct = Mathf.Max(0f, _config.AutoPullFuelBufferPercent) / 100f;
-        if (pct > 0f) requiredFuel = Mathf.CeilToInt(requiredFuel * (1f + pct));
-    }
-    if (requiredFuel <= 0) return;
-
-    var fuelScan = ScanFuelSlots(container, fuelShortname, kind);
-    int need = requiredFuel - fuelScan.CurrentFuelAmount;
-    if (need <= 0) return;
-    if (fuelScan.RemainingCapacity <= 0) return;
-
-    int available = CountPlayerItem(player, fuelShortname);
-    if (available <= 0) return;
-
-    int toMove = Mathf.Min(need, available);
-    toMove = Mathf.Min(toMove, fuelScan.RemainingCapacity);
-    if (toMove <= 0) return;
-
-    int moved = PullFuelIntoSlots(player, container, fuelShortname, toMove, fuelScan.Slots);
-    if (moved > 0)
-    {
-        container.MarkDirty();
-        oven.SendNetworkUpdateImmediate();
-
-        player.inventory?.ServerUpdate(0f);
-        player.SendNetworkUpdateImmediate();
-    }
-}
-
-private sealed class FuelSlotScanResult
-{
-    public readonly List<int> Slots = new List<int>(2);
-    public int CurrentFuelAmount;
-    public int RemainingCapacity;
-}
-
-private FuelSlotScanResult ScanFuelSlots(ItemContainer container, string fuelShortname, OvenKind kind)
-{
-    var result = new FuelSlotScanResult();
-    if (container == null || string.IsNullOrEmpty(fuelShortname)) return result;
-
-    int desired = kind == OvenKind.LargeFurnace ? 2 : 1;
-    int stackable = GetStackableAmount(fuelShortname);
-    if (stackable <= 0) stackable = 1000;
-
-    if (container.itemList != null)
-    {
-        for (int i = 0; i < container.itemList.Count; i++)
-        {
-            var it = container.itemList[i];
-            if (it?.info == null) continue;
-            if (!string.Equals(it.info.shortname, fuelShortname, StringComparison.Ordinal)) continue;
-
-            result.CurrentFuelAmount += it.amount;
-            if (!result.Slots.Contains(it.position))
-                result.Slots.Add(it.position);
-        }
-    }
-
-    if (container.capacity > 0 && result.Slots.Count < desired && !result.Slots.Contains(0))
-        result.Slots.Add(0);
-    if (kind == OvenKind.LargeFurnace && container.capacity > 1 && result.Slots.Count < desired && !result.Slots.Contains(1))
-        result.Slots.Add(1);
-
-    if (result.Slots.Count == 0)
-        result.Slots.Add(-1);
-
-    for (int i = 0; i < result.Slots.Count; i++)
-    {
-        int pos = result.Slots[i];
-        var existing = pos >= 0 ? container.GetSlot(pos) : null;
-        int existingAmt = existing != null && existing.info != null && string.Equals(existing.info.shortname, fuelShortname, StringComparison.Ordinal)
-            ? existing.amount
-            : 0;
-        result.RemainingCapacity += Mathf.Max(0, stackable - existingAmt);
-    }
-
-    return result;
-}
-
-private int CountPlayerItem(BasePlayer player, string shortname)
-{
-    if (player == null || string.IsNullOrEmpty(shortname)) return 0;
-    return CountItem(player.inventory?.containerBelt, shortname) + CountItem(player.inventory?.containerMain, shortname);
-}
-
-private string GetFuelShortname(OvenKind kind)
-{
-    switch (kind)
-    {
-        case OvenKind.SmallFurnace:
-        case OvenKind.LargeFurnace:
-            return "wood";
-        case OvenKind.SmallRefinery:
-            return "wood";
-        default:
-
-            return null;
-    }
-}
-
-private bool IsOreShortname(string shortname)
-{
-    return shortname == "metal.ore" || shortname == "sulfur.ore" || shortname == "hq.metal.ore";
-}
-
-private int GetStackableAmount(string shortname)
-{
-    if (string.IsNullOrEmpty(shortname)) return 0;
-    var def = GetCachedItemDefinition(shortname);
-    return def != null ? def.stackable : 0;
-}
-
-private int CalculateRequiredFuelForCurrentInput(BaseOven oven, OvenKind kind)
-{
-    var container = oven?.inventory;
-    if (container == null) return 0;
-
-    int minSlot = oven._inputSlotIndex;
-    int maxSlot = oven._inputSlotIndex + oven.inputSlots - 1;
-    if (minSlot < 0) minSlot = 0;
-    if (maxSlot >= container.capacity) maxSlot = container.capacity - 1;
-
-    int metal = 0, sulfur = 0, hqm = 0, crude = 0;
-
-    for (int i = minSlot; i <= maxSlot; i++)
-    {
-        var it = container.GetSlot(i);
-        if (it?.info == null || it.amount <= 0) continue;
-
-        string sn = it.info.shortname;
-        if (sn == "metal.ore") metal += it.amount;
-        else if (sn == "sulfur.ore") sulfur += it.amount;
-        else if (sn == "hq.metal.ore") hqm += it.amount;
-        else if (sn == "crude.oil") crude += it.amount;
-    }
-
-    float required = 0f;
-
-    if (kind == OvenKind.SmallRefinery)
-    {
-
-        const float refineryCompletionOverheadWoodPerCrude = 0.02f;
-        required += crude * ((20f / 9f) + refineryCompletionOverheadWoodPerCrude);
-    }
-    else if (kind == OvenKind.LargeFurnace)
-    {
-
-        required += metal * (1f / 3f);
-        required += sulfur * (1f / 6f);
-        required += hqm * (2f / 3f);
-    }
-    else
-    {
-
-        required += metal * (5f / 3f);
-        required += sulfur * (5f / 6f);
-        required += hqm * (10f / 3f);
-    }
-
-    return Mathf.CeilToInt(required);
-}
-
-private List<int> GetFuelSlotPositions(ItemContainer container, string fuelShortname, OvenKind kind)
-{
-    var slots = new List<int>();
-    if (container == null) return slots;
-
-    if (container.itemList != null)
-    {
-        for (int i = 0; i < container.itemList.Count; i++)
-        {
-            var it = container.itemList[i];
-            if (it?.info == null) continue;
-            if (!string.Equals(it.info.shortname, fuelShortname, StringComparison.Ordinal)) continue;
-            if (!slots.Contains(it.position)) slots.Add(it.position);
-        }
-    }
-
-    int desired = (kind == OvenKind.LargeFurnace) ? 2 : 1;
-
-    if (container.capacity > 0 && slots.Count < desired && !slots.Contains(0)) slots.Add(0);
-    if (kind == OvenKind.LargeFurnace && container.capacity > 1 && slots.Count < desired && !slots.Contains(1)) slots.Add(1);
-
-    if (slots.Count == 0) slots.Add(-1);
-    return slots;
-}
-
-private int PullFuelIntoSlots(BasePlayer player, ItemContainer to, string fuelShortname, int amount, List<int> fuelSlots)
-{
-    if (player == null || to == null) return 0;
-    if (amount <= 0) return 0;
-
-    int slotCount = Mathf.Max(1, fuelSlots?.Count ?? 0);
-
-    int baseAmt = amount / slotCount;
-    int rem = amount - baseAmt * slotCount;
-
-    int movedTotal = 0;
-
-    for (int si = 0; si < slotCount && movedTotal < amount; si++)
-    {
-        int want = baseAmt + (si < rem ? 1 : 0);
-        if (want <= 0) continue;
-
-        int pos = fuelSlots[si];
-
-        int moved = 0;
-        moved += PullFromContainer(player.inventory.containerBelt, to, fuelShortname, want, pos);
-        moved += PullFromContainer(player.inventory.containerMain, to, fuelShortname, want - moved, pos);
-
-        movedTotal += moved;
-    }
-
-    return movedTotal;
-}
-
-private int PullFromContainer(ItemContainer from, ItemContainer to, string shortname, int amount, int preferredPosition = -1)
-{
-    if (from == null || to == null) return 0;
-    if (amount <= 0) return 0;
-
-    int moved = 0;
-    var snapshot = GetPooledItemList();
-
-    try
-    {
-        if (from.itemList != null)
-        {
-            for (int i = 0; i < from.itemList.Count; i++)
-                snapshot.Add(from.itemList[i]);
-        }
-
-        for (int i = 0; i < snapshot.Count && moved < amount; i++)
-        {
-            var it = snapshot[i];
-            if (it == null || it.amount <= 0 || it.info == null) continue;
-            if (it.parent != from) continue;
-            if (it.info.shortname != shortname) continue;
-
-            int take = Mathf.Min(it.amount, amount - moved);
-            if (take <= 0) continue;
-
-            Item moving = it;
-            if (take < it.amount)
+            if (kind == OvenKind.SmallRefinery)
             {
-                moving = it.SplitItem(take);
-                if (moving == null) continue;
+                if (sn != ItemCrudeOil) return null;
+                return HandleRefineryCrudeInsertion(oven, item, amount, player);
             }
 
-            bool movedToTarget;
-            if (preferredPosition >= 0)
-                movedToTarget = moving.MoveToContainer(to, preferredPosition, true) || moving.MoveToContainer(to);
-            else
-                movedToTarget = moving.MoveToContainer(to);
+            if (!IsOreShortname(sn)) return null;
 
-            if (!movedToTarget)
+            if (!_config.EnableOreSplitting)
             {
-                if (moving != it)
-                {
-                    it.amount += moving.amount;
-                    moving.Remove();
-                }
-                break;
+                if (player != null) QueueFuelRecalcNextTick(oven, player);
+                return null;
             }
 
-            moved += take;
-        }
-    }
-    finally
-    {
-        ReturnPooledItemList(snapshot);
-    }
-
-    return moved;
-}
-
-private List<Item> GetPooledItemList()
-{
-    if (_itemListPool.Count > 0)
-    {
-        var list = _itemListPool.Pop();
-        list.Clear();
-        return list;
-    }
-
-    return new List<Item>(32);
-}
-
-private void ReturnPooledItemList(List<Item> list)
-{
-    if (list == null) return;
-    list.Clear();
-
-    if (_itemListPool.Count < 16)
-        _itemListPool.Push(list);
-}
-
-private int GetRefineryFinishableCrudeAmount(BaseOven oven, BasePlayer player)
-{
-    if (oven == null || oven.IsDestroyed) return 0;
-
-    var container = oven.inventory;
-    if (container == null) return 0;
-    const float woodPerCrude = 20f / 9f;
-    const float refineryCompletionOverheadWoodPerCrude = 0.02f;
-    float pct = Mathf.Max(0f, _config.AutoPullFuelBufferPercent) / 100f;
-    float effectiveWoodPerCrude = (woodPerCrude + refineryCompletionOverheadWoodPerCrude) * (1f + pct);
-    if (effectiveWoodPerCrude <= 0f) return 0;
-    var fuelScan = ScanFuelSlots(container, "wood", OvenKind.SmallRefinery);
-    int availableWood = CountPlayerItem(player, "wood");
-    int pullableWood = Mathf.Min(availableWood, fuelScan.RemainingCapacity);
-    int totalWoodPotential = fuelScan.CurrentFuelAmount + pullableWood;
-    if (totalWoodPotential <= 0) return 0;
-
-    return Mathf.Max(0, Mathf.FloorToInt(totalWoodPotential / effectiveWoodPerCrude));
-}
-
-private object HandleRefineryCrudeInsertion(BaseOven oven, Item item, int splitAmount, BasePlayer actorPlayer)
-{
-    try
-    {
-        var container = oven?.inventory;
-        if (container == null || item?.info == null) return null;
-        if (item.info.shortname != "crude.oil") return null;
-
-        int minSlot, maxSlot, slots;
-        if (!TryGetOvenInputSlotRange(oven, container, out minSlot, out maxSlot, out slots)) return null;
-
-        int existingCrude = 0;
-        for (int i = minSlot; i <= maxSlot; i++)
-        {
-            var it = container.GetSlot(i);
-            if (it == null) continue;
-
-            var isn = it.info?.shortname;
-            if (isn == null) continue;
-            if (isn != "crude.oil") return null;
-
-            existingCrude += it.amount;
+            return DistributeOreIntoInputSlots(oven, item, amount, player);
         }
 
-        int itemAmount = GetMoveAmount(item, splitAmount);
-        if (itemAmount <= 0) return null;
-
-        int maxFinishableTotalCrude = GetRefineryFinishableCrudeAmount(oven, actorPlayer);
-        int maxAdditionalByFuel = Math.Max(0, maxFinishableTotalCrude - existingCrude);
-        if (maxAdditionalByFuel <= 0)
+        private object CanMoveItem(Item item, PlayerInventory inventory, ItemContainerId targetContainerId, int targetSlotIndex, int splitAmount)
         {
-            if (actorPlayer != null)
-                QueueFuelRecalcNextTick(oven, actorPlayer);
-            return true;
-        }
-
-        int cap = CalculateInputSlotCapacity(item.info, slots);
-        int maxAdditionalBySpace = Math.Max(0, cap - existingCrude);
-        int allowedToMove = Math.Min(itemAmount, Math.Min(maxAdditionalByFuel, maxAdditionalBySpace));
-        if (allowedToMove <= 0)
-        {
-            if (actorPlayer != null)
-                QueueFuelRecalcNextTick(oven, actorPlayer);
-            return true;
-        }
-
-        int totalMoved = DistributeItemEvenlyAcrossInputSlots(container, item, minSlot, maxSlot, slots, existingCrude + allowedToMove, allowedToMove);
-        if (totalMoved <= 0) return null;
-
-        FinalizeCustomInsertion(oven, container, item, totalMoved, actorPlayer, "refinery crude insertion");
-        return true;
-    }
-    catch (Exception ex)
-    {
-        if (_config != null && _config.Debug)
-            PrintWarning($"HandleRefineryCrudeInsertion exception: {ex}");
-        return null;
-    }
-}
-
-private object DistributeOreIntoInputSlots(BaseOven oven, Item item, int splitAmount, BasePlayer actorPlayer)
-{
-    try
-    {
-        var container = oven?.inventory;
-        if (container == null || item?.info == null) return null;
-
-        int minSlot, maxSlot, slots;
-        if (!TryGetOvenInputSlotRange(oven, container, out minSlot, out maxSlot, out slots)) return null;
-
-        string sn = item.info.shortname;
-        if (!IsOreShortname(sn)) return null;
-
-        for (int i = minSlot; i <= maxSlot; i++)
-        {
-            var it = container.GetSlot(i);
-            if (it == null) continue;
-
-            var isn = it.info?.shortname;
-            if (isn == null) continue;
-
-            if (IsOreShortname(isn) && isn != sn)
+            try
             {
-                if (actorPlayer != null) QueueFuelRecalcNextTick(oven, actorPlayer);
+                if (!_config.Enabled) return null;
+                if (item?.info == null || inventory == null) return null;
+
+                var player = inventory.GetComponent<BasePlayer>();
+                if (player == null) return null;
+
+                var oven = inventory.loot?.entitySource as BaseOven;
+                if (oven == null || oven.IsDestroyed) return null;
+                if (!IsWhitelistedSmeltingOven(oven)) return null;
+
+                var targetContainer = inventory.FindContainer(targetContainerId);
+                if (targetContainer != null && !(targetContainer.entityOwner is BaseOven)) return null;
+
+                var original = item.GetRootContainer();
+                if (original == null || (original.entityOwner is BaseOven)) return null;
+
+                return HandleOvenInsertion(oven, item, splitAmount, player);
+            }
+            catch (Exception ex)
+            {
+                if (_config != null && _config.Debug)
+                    PrintWarning($"CanMoveItem(ItemContainerId) exception: {ex}");
                 return null;
             }
         }
 
-        int itemAmount = GetMoveAmount(item, splitAmount);
-        if (itemAmount <= 0) return null;
-
-        int existingTotal = CountMatchingInputItems(container, item.info, minSlot, maxSlot);
-        int cap = CalculateInputSlotCapacity(item.info, slots);
-        int totalAmount = Math.Min(existingTotal + itemAmount, cap);
-        if (totalAmount <= existingTotal) return null;
-
-        int totalMoved = DistributeItemEvenlyAcrossInputSlots(container, item, minSlot, maxSlot, slots, totalAmount, itemAmount);
-        if (totalMoved <= 0) return null;
-
-        FinalizeCustomInsertion(oven, container, item, totalMoved, actorPlayer, "ore input distribution");
-        return true;
-    }
-    catch (Exception ex)
-    {
-        if (_config != null && _config.Debug)
-            PrintWarning($"DistributeOreIntoInputSlots exception: {ex}");
-        return null;
-    }
-}
-
-private bool TryGetOvenInputSlotRange(BaseOven oven, ItemContainer container, out int minSlot, out int maxSlot, out int slots)
-{
-    minSlot = 0;
-    maxSlot = -1;
-    slots = 0;
-
-    if (oven == null || container == null || container.capacity <= 0) return false;
-
-    minSlot = oven._inputSlotIndex;
-    if (minSlot < 0) minSlot = 0;
-
-    slots = Math.Max(1, oven.inputSlots);
-    maxSlot = minSlot + slots - 1;
-    if (maxSlot >= container.capacity) maxSlot = container.capacity - 1;
-
-    if (maxSlot < minSlot) return false;
-    slots = maxSlot - minSlot + 1;
-    return slots > 0;
-}
-
-private int GetMoveAmount(Item item, int requestedAmount)
-{
-    if (item == null || item.amount <= 0) return 0;
-    return requestedAmount > 0 ? Math.Min(requestedAmount, item.amount) : item.amount;
-}
-
-private int CalculateInputSlotCapacity(ItemDefinition definition, int slots)
-{
-    if (definition == null || slots <= 0) return 0;
-
-    long capLong = (long)Math.Max(0, definition.stackable) * (long)slots;
-    if (capLong > int.MaxValue) capLong = int.MaxValue;
-    return (int)capLong;
-}
-
-private int CountMatchingInputItems(ItemContainer container, ItemDefinition definition, int minSlot, int maxSlot)
-{
-    if (container == null || definition == null) return 0;
-
-    int total = 0;
-    for (int i = minSlot; i <= maxSlot; i++)
-    {
-        var it = container.GetSlot(i);
-        if (it != null && it.info == definition)
-            total += it.amount;
-    }
-    return total;
-}
-
-private int DistributeItemEvenlyAcrossInputSlots(ItemContainer container, Item sourceItem, int minSlot, int maxSlot, int slots, int targetTotal, int maxToMove)
-{
-    if (container == null || sourceItem?.info == null) return 0;
-    if (slots <= 0 || targetTotal <= 0 || maxToMove <= 0) return 0;
-
-    int baseAmt = targetTotal / slots;
-    int rem = targetTotal - baseAmt * slots;
-    int totalMoved = 0;
-
-    for (int si = 0; si < slots; si++)
-    {
-        int slotIndex = minSlot + si;
-        if (slotIndex > maxSlot) break;
-
-        int target = baseAmt + (si < rem ? 1 : 0);
-        var cur = container.GetSlot(slotIndex);
-
-        int curAmt = 0;
-        if (cur != null)
+        private void TryAutoPullFuel(BaseOven oven, BasePlayer player)
         {
-            if (cur.info != sourceItem.info) return totalMoved;
-            curAmt = cur.amount;
-        }
+            if (!_config.Enabled) return;
+            if (!_config.AutoPullFuelFromPlayer) return;
+            if (oven == null || oven.IsDestroyed) return;
+            if (player == null || !player.IsConnected) return;
 
-        int delta = target - curAmt;
-        if (delta <= 0) continue;
+            var kind = GetKind(oven);
+            string fuelShortname = GetFuelShortname(kind);
+            if (string.IsNullOrEmpty(fuelShortname)) return;
 
-        if (cur == null)
-        {
-            var newItem = ItemManager.Create(sourceItem.info, delta, sourceItem.skin);
-            if (newItem == null) continue;
-            if (!newItem.MoveToContainer(container, slotIndex, allowStack: false))
+            var container = oven.inventory;
+            if (container == null) return;
+
+            int requiredFuel = CalculateRequiredFuelForCurrentInput(oven, kind);
+            if (requiredFuel > 0)
             {
-                newItem.Remove();
-                continue;
+                float pct = Mathf.Max(0f, _config.AutoPullFuelBufferPercent) / 100f;
+                if (pct > 0f) requiredFuel = Mathf.CeilToInt(requiredFuel * (1f + pct));
+            }
+            if (requiredFuel <= 0) return;
+
+            var fuelScan = ScanFuelSlots(container, fuelShortname, kind);
+            int need = requiredFuel - fuelScan.CurrentFuelAmount;
+            if (need <= 0) return;
+            if (fuelScan.RemainingCapacity <= 0) return;
+
+            int available = CountPlayerItem(player, fuelShortname);
+            if (available <= 0) return;
+
+            int toMove = Mathf.Min(need, available);
+            toMove = Mathf.Min(toMove, fuelScan.RemainingCapacity);
+            if (toMove <= 0) return;
+
+            int moved = PullFuelIntoSlots(player, container, fuelShortname, toMove, fuelScan.Slots);
+            if (moved > 0)
+            {
+                container.MarkDirty();
+                oven.SendNetworkUpdateImmediate();
+
+                player.inventory?.ServerUpdate(0f);
+                player.SendNetworkUpdateImmediate();
             }
         }
-        else
+
+        private sealed class FuelSlotScanResult
         {
-            cur.amount += delta;
-            cur.MarkDirty();
+            public readonly List<int> Slots = new List<int>(2);
+            public int CurrentFuelAmount;
+            public int RemainingCapacity;
         }
 
-        totalMoved += delta;
-        if (totalMoved >= maxToMove) break;
-    }
-
-    return totalMoved;
-}
-
-private void FinalizeCustomInsertion(BaseOven oven, ItemContainer container, Item item, int movedAmount, BasePlayer actorPlayer, string context)
-{
-    var originalParent = item.parent;
-    var ownerPlayer = actorPlayer ?? item.GetOwnerPlayer();
-
-    if (movedAmount >= item.amount)
-        item.Remove();
-    else
-    {
-        item.amount -= movedAmount;
-        item.MarkDirty();
-    }
-
-    SafeMarkDirty(originalParent, $"item parent after {context}");
-
-    if (ownerPlayer != null)
-    {
-        SafeInventoryUpdate(ownerPlayer, $"owner inventory after {context}");
-        SafePlayerNetworkUpdate(ownerPlayer, $"owner network after {context}");
-    }
-
-    container.MarkDirty();
-    oven.SendNetworkUpdateImmediate();
-
-    if (actorPlayer != null) QueueFuelRecalcNextTick(oven, actorPlayer);
-    else if (ownerPlayer != null) QueueFuelRecalcNextTick(oven, ownerPlayer);
-}
-
-private void SafeMarkDirty(ItemContainer container, string context)
-{
-    try { container?.MarkDirty(); }
-    catch (Exception ex)
-    {
-        if (_config != null && _config.Debug)
-            PrintWarning($"SmartSmelt safe MarkDirty failed ({context}): {ex.Message}");
-    }
-}
-
-private void SafeInventoryUpdate(BasePlayer player, string context)
-{
-    try { player?.inventory?.ServerUpdate(0f); }
-    catch (Exception ex)
-    {
-        if (_config != null && _config.Debug)
-            PrintWarning($"SmartSmelt safe inventory update failed ({context}): {ex.Message}");
-    }
-}
-
-private void SafePlayerNetworkUpdate(BasePlayer player, string context)
-{
-    try { player?.SendNetworkUpdateImmediate(); }
-    catch (Exception ex)
-    {
-        if (_config != null && _config.Debug)
-            PrintWarning($"SmartSmelt safe player network update failed ({context}): {ex.Message}");
-    }
-}
-
-object CanMoveItem(Item item, PlayerInventory playerInventory, ItemContainer targetContainer, int targetSlot, int amount)
-{
-    try
-    {
-        if (!_config.Enabled) return null;
-        if (item?.info == null || targetContainer == null) return null;
-
-        var owner = targetContainer.entityOwner as BaseOven;
-        if (owner == null || owner.IsDestroyed) return null;
-        if (!IsWhitelistedSmeltingOven(owner)) return null;
-
-        var kind = GetKind(owner);
-        if (kind == OvenKind.Unknown) return null;
-
-        var src = item.parent;
-        if (src != null && src.entityOwner is BaseOven) return null;
-
-        string sn = item.info.shortname;
-        var player = playerInventory?.GetComponent<BasePlayer>();
-
-        if (kind == OvenKind.SmallRefinery)
+        private FuelSlotScanResult ScanFuelSlots(ItemContainer container, string fuelShortname, OvenKind kind)
         {
-            if (sn != "crude.oil") return null;
-            return HandleRefineryCrudeInsertion(owner, item, amount, player);
+            var result = new FuelSlotScanResult();
+            if (container == null || string.IsNullOrEmpty(fuelShortname)) return result;
+
+            int desired = kind == OvenKind.LargeFurnace ? 2 : 1;
+            int stackable = GetStackableAmount(fuelShortname);
+            if (stackable <= 0) stackable = 1000;
+
+            if (container.itemList != null)
+            {
+                for (int i = 0; i < container.itemList.Count; i++)
+                {
+                    var it = container.itemList[i];
+                    if (it?.info == null) continue;
+                    if (!string.Equals(it.info.shortname, fuelShortname, StringComparison.Ordinal)) continue;
+
+                    result.CurrentFuelAmount += it.amount;
+                    if (!result.Slots.Contains(it.position))
+                        result.Slots.Add(it.position);
+                }
+            }
+
+            if (container.capacity > 0 && result.Slots.Count < desired && !result.Slots.Contains(0))
+                result.Slots.Add(0);
+            if (kind == OvenKind.LargeFurnace && container.capacity > 1 && result.Slots.Count < desired && !result.Slots.Contains(1))
+                result.Slots.Add(1);
+
+            if (result.Slots.Count == 0)
+                result.Slots.Add(-1);
+
+            for (int i = 0; i < result.Slots.Count; i++)
+            {
+                int pos = result.Slots[i];
+                var existing = pos >= 0 ? container.GetSlot(pos) : null;
+                int existingAmt = existing != null && existing.info != null && string.Equals(existing.info.shortname, fuelShortname, StringComparison.Ordinal)
+                    ? existing.amount
+                    : 0;
+                result.RemainingCapacity += Mathf.Max(0, stackable - existingAmt);
+            }
+
+            return result;
         }
 
-        if (sn != "metal.ore" && sn != "sulfur.ore" && sn != "hq.metal.ore") return null;
+        private int CountPlayerItem(BasePlayer player, string shortname)
+        {
+            if (player == null || string.IsNullOrEmpty(shortname)) return 0;
+            return CountItem(player.inventory?.containerBelt, shortname) + CountItem(player.inventory?.containerMain, shortname);
+        }
 
-        return DistributeOreIntoInputSlots(owner, item, amount, player);
-    }
-    catch (Exception ex)
-    {
-        if (_config != null && _config.Debug)
-            PrintWarning($"CanMoveItem(ItemContainer) exception: {ex}");
+        private string GetFuelShortname(OvenKind kind)
+        {
+            switch (kind)
+            {
+                case OvenKind.SmallFurnace:
+                case OvenKind.LargeFurnace:
+                    return ItemWood;
+                case OvenKind.SmallRefinery:
+                    return ItemWood;
+                default:
 
-        return null;
-    }
-}
+                    return null;
+            }
+        }
+
+        private bool IsOreShortname(string shortname)
+        {
+            return shortname == ItemMetalOre || shortname == ItemSulfurOre || shortname == ItemHqMetalOre;
+        }
+
+        private int GetStackableAmount(string shortname)
+        {
+            if (string.IsNullOrEmpty(shortname)) return 0;
+            var def = GetCachedItemDefinition(shortname);
+            return def != null ? def.stackable : 0;
+        }
+
+        private int CalculateRequiredFuelForCurrentInput(BaseOven oven, OvenKind kind)
+        {
+            var container = oven?.inventory;
+            if (container == null) return 0;
+
+            int minSlot = oven._inputSlotIndex;
+            int maxSlot = oven._inputSlotIndex + oven.inputSlots - 1;
+            if (minSlot < 0) minSlot = 0;
+            if (maxSlot >= container.capacity) maxSlot = container.capacity - 1;
+
+            int metal = 0, sulfur = 0, hqm = 0, crude = 0;
+
+            for (int i = minSlot; i <= maxSlot; i++)
+            {
+                var it = container.GetSlot(i);
+                if (it?.info == null || it.amount <= 0) continue;
+
+                string sn = it.info.shortname;
+                if (sn == ItemMetalOre) metal += it.amount;
+                else if (sn == ItemSulfurOre) sulfur += it.amount;
+                else if (sn == ItemHqMetalOre) hqm += it.amount;
+                else if (sn == ItemCrudeOil) crude += it.amount;
+            }
+
+            // Derive everything from GetWoodPerInput so the wood-cost scale and any future
+            // ratio changes apply to auto-pull amounts and actual burn identically.
+            float required = 0f;
+            float maxWoodPerInput = 0f;
+
+            if (kind == OvenKind.SmallRefinery)
+            {
+                float crudeWpi = GetWoodPerInput(kind, ItemCrudeOil);
+                required += crude * crudeWpi;
+                if (crude > 0 && crudeWpi > maxWoodPerInput) maxWoodPerInput = crudeWpi;
+            }
+            else
+            {
+                float metalWpi = GetWoodPerInput(kind, ItemMetalOre);
+                float sulfurWpi = GetWoodPerInput(kind, ItemSulfurOre);
+                float hqmWpi = GetWoodPerInput(kind, ItemHqMetalOre);
+
+                required += metal * metalWpi;
+                required += sulfur * sulfurWpi;
+                required += hqm * hqmWpi;
+
+                if (metal > 0 && metalWpi > maxWoodPerInput) maxWoodPerInput = metalWpi;
+                if (sulfur > 0 && sulfurWpi > maxWoodPerInput) maxWoodPerInput = sulfurWpi;
+                if (hqm > 0 && hqmWpi > maxWoodPerInput) maxWoodPerInput = hqmWpi;
+            }
+
+            if (required <= 0f) return 0;
+
+            // Exact accounting instead of a percentage buffer: the vanilla burn keeps
+            // consuming wood underneath the plugin for the whole smelt duration, and the
+            // integer fuel gate needs ceil(woodPerInput) present to smelt the final unit.
+            // Both are real, flat costs — they do not scale as a tax on batch size.
+            required += EstimateNativeBurnWood(kind, metal + sulfur + hqm + crude);
+            required += Mathf.Ceil(maxWoodPerInput);
+
+            return Mathf.CeilToInt(required);
+        }
+
+        private int PullFuelIntoSlots(BasePlayer player, ItemContainer to, string fuelShortname, int amount, List<int> fuelSlots)
+        {
+            if (player == null || to == null) return 0;
+            if (amount <= 0) return 0;
+
+            int slotCount = Mathf.Max(1, fuelSlots?.Count ?? 0);
+
+            int baseAmt = amount / slotCount;
+            int rem = amount - baseAmt * slotCount;
+
+            int movedTotal = 0;
+
+            for (int si = 0; si < slotCount && movedTotal < amount; si++)
+            {
+                int want = baseAmt + (si < rem ? 1 : 0);
+                if (want <= 0) continue;
+
+                int pos = fuelSlots[si];
+
+                int moved = 0;
+                moved += PullFromContainer(player.inventory.containerBelt, to, fuelShortname, want, pos);
+                moved += PullFromContainer(player.inventory.containerMain, to, fuelShortname, want - moved, pos);
+
+                movedTotal += moved;
+            }
+
+            return movedTotal;
+        }
+
+        private int PullFromContainer(ItemContainer from, ItemContainer to, string shortname, int amount, int preferredPosition = -1)
+        {
+            if (from == null || to == null) return 0;
+            if (amount <= 0) return 0;
+
+            int moved = 0;
+            var snapshot = GetPooledItemList();
+
+            try
+            {
+                if (from.itemList != null)
+                {
+                    for (int i = 0; i < from.itemList.Count; i++)
+                        snapshot.Add(from.itemList[i]);
+                }
+
+                for (int i = 0; i < snapshot.Count && moved < amount; i++)
+                {
+                    var it = snapshot[i];
+                    if (it == null || it.amount <= 0 || it.info == null) continue;
+                    if (it.parent != from) continue;
+                    if (it.info.shortname != shortname) continue;
+
+                    int take = Mathf.Min(it.amount, amount - moved);
+                    if (take <= 0) continue;
+
+                    Item moving = it;
+                    if (take < it.amount)
+                    {
+                        moving = it.SplitItem(take);
+                        if (moving == null) continue;
+                    }
+
+                    bool movedToTarget;
+                    if (preferredPosition >= 0)
+                        movedToTarget = moving.MoveToContainer(to, preferredPosition, true) || moving.MoveToContainer(to);
+                    else
+                        movedToTarget = moving.MoveToContainer(to);
+
+                    if (!movedToTarget)
+                    {
+                        if (moving != it)
+                        {
+                            it.amount += moving.amount;
+                            moving.Remove();
+                        }
+                        break;
+                    }
+
+                    moved += take;
+                }
+            }
+            finally
+            {
+                ReturnPooledItemList(snapshot);
+            }
+
+            return moved;
+        }
+
+        private List<Item> GetPooledItemList()
+        {
+            if (_itemListPool.Count > 0)
+            {
+                var list = _itemListPool.Pop();
+                list.Clear();
+                return list;
+            }
+
+            return new List<Item>(32);
+        }
+
+        private void ReturnPooledItemList(List<Item> list)
+        {
+            if (list == null) return;
+            list.Clear();
+
+            if (_itemListPool.Count < 16)
+                _itemListPool.Push(list);
+        }
+
+        private int GetRefineryFinishableCrudeAmount(BaseOven oven, BasePlayer player)
+        {
+            if (oven == null || oven.IsDestroyed) return 0;
+
+            var container = oven.inventory;
+            if (container == null) return 0;
+            float woodPerCrude = GetWoodPerInput(OvenKind.SmallRefinery, ItemCrudeOil);
+
+            // A wood cost of zero (WoodCostScale = 0) means crude is not fuel-limited at all.
+            if (woodPerCrude <= 0f) return int.MaxValue;
+
+            float pct = Mathf.Max(0f, _config.AutoPullFuelBufferPercent) / 100f;
+            float effectiveWoodPerCrude = (woodPerCrude + GetNativeBurnWoodPerUnit(OvenKind.SmallRefinery)) * (1f + pct);
+
+            var fuelScan = ScanFuelSlots(container, ItemWood, OvenKind.SmallRefinery);
+            int availableWood = CountPlayerItem(player, ItemWood);
+            int pullableWood = Mathf.Min(availableWood, fuelScan.RemainingCapacity);
+            int totalWoodPotential = fuelScan.CurrentFuelAmount + pullableWood;
+
+            // Reserve the flat finish headroom the integer fuel gate needs for the last crude
+            // so the insertion cap and the pull math agree on what is actually finishable.
+            float usableWood = totalWoodPotential - Mathf.Ceil(woodPerCrude);
+            if (usableWood <= 0f) return 0;
+
+            return Mathf.Max(0, Mathf.FloorToInt(usableWood / effectiveWoodPerCrude));
+        }
+
+        private object HandleRefineryCrudeInsertion(BaseOven oven, Item item, int splitAmount, BasePlayer actorPlayer)
+        {
+            try
+            {
+                var container = oven?.inventory;
+                if (container == null || item?.info == null) return null;
+                if (item.info.shortname != ItemCrudeOil) return null;
+
+                int minSlot, maxSlot, slots;
+                if (!TryGetOvenInputSlotRange(oven, container, out minSlot, out maxSlot, out slots)) return null;
+
+                int existingCrude = 0;
+                for (int i = minSlot; i <= maxSlot; i++)
+                {
+                    var it = container.GetSlot(i);
+                    if (it == null) continue;
+
+                    var isn = it.info?.shortname;
+                    if (isn == null) continue;
+                    if (isn != ItemCrudeOil) return null;
+
+                    existingCrude += it.amount;
+                }
+
+                int itemAmount = GetMoveAmount(item, splitAmount);
+                if (itemAmount <= 0) return null;
+
+                int maxFinishableTotalCrude = GetRefineryFinishableCrudeAmount(oven, actorPlayer);
+                int maxAdditionalByFuel = Math.Max(0, maxFinishableTotalCrude - existingCrude);
+                if (maxAdditionalByFuel <= 0)
+                {
+                    if (actorPlayer != null)
+                        QueueFuelRecalcNextTick(oven, actorPlayer);
+                    return true;
+                }
+
+                int cap = CalculateInputSlotCapacity(item.info, slots);
+                int maxAdditionalBySpace = Math.Max(0, cap - existingCrude);
+                int allowedToMove = Math.Min(itemAmount, Math.Min(maxAdditionalByFuel, maxAdditionalBySpace));
+                if (allowedToMove <= 0)
+                {
+                    if (actorPlayer != null)
+                        QueueFuelRecalcNextTick(oven, actorPlayer);
+                    return true;
+                }
+
+                int totalMoved = DistributeItemEvenlyAcrossInputSlots(container, item, minSlot, maxSlot, slots, existingCrude + allowedToMove, allowedToMove);
+                if (totalMoved <= 0) return null;
+
+                FinalizeCustomInsertion(oven, container, item, totalMoved, actorPlayer, "refinery crude insertion");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (_config != null && _config.Debug)
+                    PrintWarning($"HandleRefineryCrudeInsertion exception: {ex}");
+                return null;
+            }
+        }
+
+        private object DistributeOreIntoInputSlots(BaseOven oven, Item item, int splitAmount, BasePlayer actorPlayer)
+        {
+            try
+            {
+                var container = oven?.inventory;
+                if (container == null || item?.info == null) return null;
+
+                int minSlot, maxSlot, slots;
+                if (!TryGetOvenInputSlotRange(oven, container, out minSlot, out maxSlot, out slots)) return null;
+
+                string sn = item.info.shortname;
+                if (!IsOreShortname(sn)) return null;
+
+                for (int i = minSlot; i <= maxSlot; i++)
+                {
+                    var it = container.GetSlot(i);
+                    if (it == null) continue;
+
+                    var isn = it.info?.shortname;
+                    if (isn == null) continue;
+
+                    if (IsOreShortname(isn) && isn != sn)
+                    {
+                        if (actorPlayer != null) QueueFuelRecalcNextTick(oven, actorPlayer);
+                        return null;
+                    }
+                }
+
+                int itemAmount = GetMoveAmount(item, splitAmount);
+                if (itemAmount <= 0) return null;
+
+                int existingTotal = CountMatchingInputItems(container, item.info, minSlot, maxSlot);
+                int cap = CalculateInputSlotCapacity(item.info, slots);
+                int totalAmount = Math.Min(existingTotal + itemAmount, cap);
+                if (totalAmount <= existingTotal) return null;
+
+                int totalMoved = DistributeItemEvenlyAcrossInputSlots(container, item, minSlot, maxSlot, slots, totalAmount, itemAmount);
+                if (totalMoved <= 0) return null;
+
+                FinalizeCustomInsertion(oven, container, item, totalMoved, actorPlayer, "ore input distribution");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (_config != null && _config.Debug)
+                    PrintWarning($"DistributeOreIntoInputSlots exception: {ex}");
+                return null;
+            }
+        }
+
+        private bool TryGetOvenInputSlotRange(BaseOven oven, ItemContainer container, out int minSlot, out int maxSlot, out int slots)
+        {
+            minSlot = 0;
+            maxSlot = -1;
+            slots = 0;
+
+            if (oven == null || container == null || container.capacity <= 0) return false;
+
+            minSlot = oven._inputSlotIndex;
+            if (minSlot < 0) minSlot = 0;
+
+            slots = Math.Max(1, oven.inputSlots);
+            maxSlot = minSlot + slots - 1;
+            if (maxSlot >= container.capacity) maxSlot = container.capacity - 1;
+
+            if (maxSlot < minSlot) return false;
+            slots = maxSlot - minSlot + 1;
+            return slots > 0;
+        }
+
+        private int GetMoveAmount(Item item, int requestedAmount)
+        {
+            if (item == null || item.amount <= 0) return 0;
+            return requestedAmount > 0 ? Math.Min(requestedAmount, item.amount) : item.amount;
+        }
+
+        private int CalculateInputSlotCapacity(ItemDefinition definition, int slots)
+        {
+            if (definition == null || slots <= 0) return 0;
+
+            long capLong = (long)Math.Max(0, definition.stackable) * (long)slots;
+            if (capLong > int.MaxValue) capLong = int.MaxValue;
+            return (int)capLong;
+        }
+
+        private int CountMatchingInputItems(ItemContainer container, ItemDefinition definition, int minSlot, int maxSlot)
+        {
+            if (container == null || definition == null) return 0;
+
+            int total = 0;
+            for (int i = minSlot; i <= maxSlot; i++)
+            {
+                var it = container.GetSlot(i);
+                if (it != null && it.info == definition)
+                    total += it.amount;
+            }
+            return total;
+        }
+
+        private int DistributeItemEvenlyAcrossInputSlots(ItemContainer container, Item sourceItem, int minSlot, int maxSlot, int slots, int targetTotal, int maxToMove)
+        {
+            if (container == null || sourceItem?.info == null) return 0;
+            if (slots <= 0 || targetTotal <= 0 || maxToMove <= 0) return 0;
+
+            int baseAmt = targetTotal / slots;
+            int rem = targetTotal - baseAmt * slots;
+            int totalMoved = 0;
+
+            for (int si = 0; si < slots; si++)
+            {
+                int slotIndex = minSlot + si;
+                if (slotIndex > maxSlot) break;
+
+                int target = baseAmt + (si < rem ? 1 : 0);
+                var cur = container.GetSlot(slotIndex);
+
+                int curAmt = 0;
+                if (cur != null)
+                {
+                    // Never merge stacks with a different skin — that would silently destroy the skin.
+                    if (cur.info != sourceItem.info || cur.skin != sourceItem.skin) return totalMoved;
+                    curAmt = cur.amount;
+                }
+
+                int delta = target - curAmt;
+                if (delta <= 0) continue;
+
+                if (cur == null)
+                {
+                    var newItem = ItemManager.Create(sourceItem.info, delta, sourceItem.skin);
+                    if (newItem == null) continue;
+                    if (!newItem.MoveToContainer(container, slotIndex, allowStack: false))
+                    {
+                        newItem.Remove();
+                        continue;
+                    }
+                }
+                else
+                {
+                    cur.amount += delta;
+                    cur.MarkDirty();
+                }
+
+                totalMoved += delta;
+                if (totalMoved >= maxToMove) break;
+            }
+
+            return totalMoved;
+        }
+
+        private void FinalizeCustomInsertion(BaseOven oven, ItemContainer container, Item item, int movedAmount, BasePlayer actorPlayer, string context)
+        {
+            var originalParent = item.parent;
+            var ownerPlayer = actorPlayer ?? item.GetOwnerPlayer();
+
+            if (movedAmount >= item.amount)
+                item.Remove();
+            else
+            {
+                item.amount -= movedAmount;
+                item.MarkDirty();
+            }
+
+            SafeMarkDirty(originalParent, $"item parent after {context}");
+
+            if (ownerPlayer != null)
+            {
+                SafeInventoryUpdate(ownerPlayer, $"owner inventory after {context}");
+                SafePlayerNetworkUpdate(ownerPlayer, $"owner network after {context}");
+            }
+
+            container.MarkDirty();
+            oven.SendNetworkUpdateImmediate();
+
+            if (actorPlayer != null) QueueFuelRecalcNextTick(oven, actorPlayer);
+            else if (ownerPlayer != null) QueueFuelRecalcNextTick(oven, ownerPlayer);
+        }
+
+        private void SafeMarkDirty(ItemContainer container, string context)
+        {
+            try { container?.MarkDirty(); }
+            catch (Exception ex)
+            {
+                if (_config != null && _config.Debug)
+                    PrintWarning($"SmartSmelt safe MarkDirty failed ({context}): {ex.Message}");
+            }
+        }
+
+        private void SafeInventoryUpdate(BasePlayer player, string context)
+        {
+            try { player?.inventory?.ServerUpdate(0f); }
+            catch (Exception ex)
+            {
+                if (_config != null && _config.Debug)
+                    PrintWarning($"SmartSmelt safe inventory update failed ({context}): {ex.Message}");
+            }
+        }
+
+        private void SafePlayerNetworkUpdate(BasePlayer player, string context)
+        {
+            try { player?.SendNetworkUpdateImmediate(); }
+            catch (Exception ex)
+            {
+                if (_config != null && _config.Debug)
+                    PrintWarning($"SmartSmelt safe player network update failed ({context}): {ex.Message}");
+            }
+        }
+
+        private object CanMoveItem(Item item, PlayerInventory playerInventory, ItemContainer targetContainer, int targetSlot, int amount)
+        {
+            try
+            {
+                if (!_config.Enabled) return null;
+                if (item?.info == null || targetContainer == null) return null;
+
+                var owner = targetContainer.entityOwner as BaseOven;
+                if (owner == null || owner.IsDestroyed) return null;
+                if (!IsWhitelistedSmeltingOven(owner)) return null;
+
+                var src = item.parent;
+                if (src != null && src.entityOwner is BaseOven) return null;
+
+                var player = playerInventory?.GetComponent<BasePlayer>();
+
+                return HandleOvenInsertion(owner, item, amount, player);
+            }
+            catch (Exception ex)
+            {
+                if (_config != null && _config.Debug)
+                    PrintWarning($"CanMoveItem(ItemContainer) exception: {ex}");
+
+                return null;
+            }
+        }
 
         #endregion
         #region Tracking
@@ -1713,56 +1768,56 @@ object CanMoveItem(Item item, PlayerInventory playerInventory, ItemContainer tar
             _startupScanTracked = 0;
         }
 
-private void StartTracking(BaseOven oven)
-{
-    if (oven == null || oven.net == null) return;
+        private void StartTracking(BaseOven oven)
+        {
+            if (oven == null || oven.net == null) return;
 
-    ulong id = oven.net.ID.Value;
-    if (_active.TryGetValue(id, out var existing))
-    {
-        existing.Oven = oven;
-        return;
-    }
+            ulong id = oven.net.ID.Value;
+            if (_active.TryGetValue(id, out var existing))
+            {
+                existing.Oven = oven;
+                return;
+            }
 
-    var kind = GetKind(oven);
-    if (kind == OvenKind.Unknown) return;
+            var kind = GetKind(oven);
+            if (kind == OvenKind.Unknown) return;
 
-    var tracker = new OvenTracker
-    {
-        Oven = oven,
-        Kind = kind,
-        GateOnWood = (kind == OvenKind.SmallFurnace || kind == OvenKind.LargeFurnace || kind == OvenKind.SmallRefinery),
-        Cycles = 0,
-        OffCycles = 0,
-        CharcoalRemainder = 0f,
-        FuelDebt = 0f,
-        LastBalanceTime = 0f
-    };
+            var tracker = new OvenTracker
+            {
+                Oven = oven,
+                Kind = kind,
+                GateOnWood = (kind == OvenKind.SmallFurnace || kind == OvenKind.LargeFurnace || kind == OvenKind.SmallRefinery),
+                Cycles = 0,
+                OffCycles = 0,
+                CharcoalRemainder = 0f,
+                FuelDebt = 0f,
+                LastBalanceTime = 0f
+            };
 
-        RefreshCachedPreset();
-    var preset = GetEffectivePresetForKind(_cachedPresetTuning, kind);
-    tracker.LastBalanceTime = Time.realtimeSinceStartup;
-    tracker.NextTickAt = tracker.LastBalanceTime + UnityEngine.Random.Range(0f, Mathf.Max(MinGlobalLoopInterval, preset.CycleSeconds));
+            RefreshCachedPreset();
+            var preset = GetEffectivePresetForKind(_cachedPresetTuning, kind);
+            tracker.LastBalanceTime = Time.realtimeSinceStartup;
+            tracker.NextTickAt = tracker.LastBalanceTime + UnityEngine.Random.Range(0f, Mathf.Max(MinGlobalLoopInterval, preset.CycleSeconds));
 
-    _active[id] = tracker; MarkActiveChanged();
+            _active[id] = tracker; MarkActiveChanged();
 
-    if (_config.VerboseTrackingLogs)
-        Puts($"Tracking oven {oven.ShortPrefabName} ({id}) using preset {_config.Preset}.");
-}
+            if (_config.VerboseTrackingLogs)
+                Puts($"Tracking oven {oven.ShortPrefabName} ({id}) using preset {_config.Preset}.");
+        }
 
-private void StopTracking(BaseOven oven)
-{
-    if (oven == null || oven.net == null) return;
+        private void StopTracking(BaseOven oven)
+        {
+            if (oven == null || oven.net == null) return;
 
-    ulong id = oven.net.ID.Value;
-    _cachedOvenPrefabNamesLower.Remove(id);
-    if (_active.Remove(id))
-    {
-        MarkActiveChanged();
-        if (_config.Debug)
-            Puts($"Stopped tracking oven {oven.ShortPrefabName} ({id})");
-    }
-}
+            ulong id = oven.net.ID.Value;
+            _cachedOvenPrefabNamesLower.Remove(id);
+            if (_active.Remove(id))
+            {
+                MarkActiveChanged();
+                if (_config.Debug)
+                    Puts($"Stopped tracking oven {oven.ShortPrefabName} ({id})");
+            }
+        }
         #endregion
         #region Core Loop
 
@@ -1826,78 +1881,81 @@ private void StopTracking(BaseOven oven)
             return false;
         }
 
-private void GlobalTick()
-{
-    if (!_config.Enabled) return;
-
-        RefreshCachedPreset();
-    var preset = _cachedPresetTuning;
-    int multiplier = _cachedPresetMultiplier;
-    bool isInstantPreset = _cachedIsInstantPreset;
-    float now = Time.realtimeSinceStartup;
-
-    if (_active.Count == 0) return;
-
-    if (_tmpTrackerIdsBuiltForVersion != _activeVersion || _tmpTrackerIds.Count != _active.Count)
-    {
-        _tmpTrackerIds.Clear();
-        foreach (var kv in _active)
-            _tmpTrackerIds.Add(kv.Key);
-        _tmpTrackerIdsBuiltForVersion = _activeVersion;
-    }
-
-    if (_tmpTrackerIds.Count == 0) return;
-
-    int processed = 0;
-    int count = _tmpTrackerIds.Count;
-    int startIndex = (_globalCursor >= 0 ? _globalCursor : 0) % count;
-
-    int cap = GetOvensPerGlobalTickCap(count);
-
-    for (int step = 0; step < count && processed < cap; step++)
-    {
-        int idx = (startIndex + step) % count;
-        ulong id = _tmpTrackerIds[idx];
-
-        if (!_active.TryGetValue(id, out var tracker) || tracker == null)
-            continue;
-
-        var oven = tracker.Oven;
-        if (oven == null || oven.IsDestroyed || oven.net == null)
+        private void GlobalTick()
         {
-            _active.Remove(id);
-            _cachedOvenPrefabNamesLower.Remove(id);
-            MarkActiveChanged();
-            continue;
-        }
+            if (!_config.Enabled) return;
 
-        if (!oven.IsOn())
-        {
-            tracker.OffCycles++;
-            if (tracker.OffCycles >= MaxOffCyclesBeforeEvict)
+            RefreshCachedPreset();
+            var preset = _cachedPresetTuning;
+            int multiplier = _cachedPresetMultiplier;
+            bool isInstantPreset = _cachedIsInstantPreset;
+            float now = Time.realtimeSinceStartup;
+
+            if (_active.Count == 0) return;
+
+            if (_tmpTrackerIdsBuiltForVersion != _activeVersion || _tmpTrackerIds.Count != _active.Count)
             {
-                _active.Remove(id);
-                _cachedOvenPrefabNamesLower.Remove(id);
-                MarkActiveChanged();
+                _tmpTrackerIds.Clear();
+                foreach (var kv in _active)
+                    _tmpTrackerIds.Add(kv.Key);
+                _tmpTrackerIdsBuiltForVersion = _activeVersion;
             }
-            continue;
+
+            if (_tmpTrackerIds.Count == 0) return;
+
+            int processed = 0;
+            int count = _tmpTrackerIds.Count;
+            int startIndex = (_globalCursor >= 0 ? _globalCursor : 0) % count;
+
+            int cap = GetOvensPerGlobalTickCap(count);
+
+            int step = 0;
+            for (; step < count && processed < cap; step++)
+            {
+                int idx = (startIndex + step) % count;
+                ulong id = _tmpTrackerIds[idx];
+
+                if (!_active.TryGetValue(id, out var tracker) || tracker == null)
+                    continue;
+
+                var oven = tracker.Oven;
+                if (oven == null || oven.IsDestroyed || oven.net == null)
+                {
+                    _active.Remove(id);
+                    _cachedOvenPrefabNamesLower.Remove(id);
+                    MarkActiveChanged();
+                    continue;
+                }
+
+                if (!oven.IsOn())
+                {
+                    tracker.OffCycles++;
+                    if (tracker.OffCycles >= MaxOffCyclesBeforeEvict)
+                    {
+                        _active.Remove(id);
+                        _cachedOvenPrefabNamesLower.Remove(id);
+                        MarkActiveChanged();
+                    }
+                    continue;
+                }
+                tracker.OffCycles = 0;
+
+                if (now < tracker.NextTickAt)
+                    continue;
+
+                var effectivePreset = GetEffectivePresetForKind(preset, tracker.Kind);
+                tracker.NextTickAt = now + Mathf.Max(MinGlobalLoopInterval, effectivePreset.CycleSeconds);
+
+                TickOven(tracker, effectivePreset, multiplier, isInstantPreset);
+                processed++;
+            }
+
+            EnsureGlobalTimer(ComputeGlobalLoopInterval(count));
+
+            // Advance the cursor past everything examined this tick so ovens beyond the
+            // per-tick cap are not starved when the tracked count exceeds the cap.
+            _globalCursor = (startIndex + Math.Max(1, step)) % count;
         }
-        tracker.OffCycles = 0;
-
-        if (now < tracker.NextTickAt)
-            continue;
-
-        var effectivePreset = GetEffectivePresetForKind(preset, tracker.Kind);
-        tracker.NextTickAt = now + Mathf.Max(MinGlobalLoopInterval, effectivePreset.CycleSeconds);
-
-        TickOven(tracker, effectivePreset, multiplier, isInstantPreset);
-        processed++;
-    }
-
-    EnsureGlobalTimer(ComputeGlobalLoopInterval(count));
-
-    _globalCursor = (startIndex + 1) % count;
-}
 
         private void TickOven(OvenTracker tracker, PresetTuning preset, int multiplier, bool isInstantPreset)
         {
@@ -1917,10 +1975,19 @@ private void GlobalTick()
 
                 var inputs = tracker.InputsBuffer;
                 FillSmeltableInputs(container, kind, inputs);
-                if (inputs.Count == 0) return;
+                if (inputs.Count == 0)
+                {
+                    // Furnaces still burn wood natively when they contain no ore. Add only
+                    // the preset's extra burn so wood-only charcoal production stays in sync.
+                    if (kind != OvenKind.ElectricFurnace && kind != OvenKind.SmallRefinery)
+                        ConsumeIdleFuel(tracker, kind, container, preset, multiplier, 0, isInstantPreset);
+
+                    tracker.Cycles++;
+                    return;
+                }
 
                 bool gateOnWood = tracker.GateOnWood;
-                float woodAvailableFloat = gateOnWood ? CountItem(container, "wood") : int.MaxValue;
+                float woodAvailableFloat = gateOnWood ? CountItem(container, ItemWood) : int.MaxValue;
 
                 if (ShouldPauseForCharcoalOverflow(oven, container, gateOnWood))
                     return;
@@ -1963,7 +2030,7 @@ private void GlobalTick()
             if (!gateOnWood) return false;
             if (!_config.ProduceCharcoalFromFuel) return false;
             if (!string.Equals(_config.CharcoalOverflowMode, "Pause", StringComparison.OrdinalIgnoreCase)) return false;
-            if (CanGiveOutput(container, "charcoal", 1)) return false;
+            if (CanGiveOutput(container, ItemCharcoal, 1)) return false;
 
             if (_config.Debug)
                 Puts($"{oven.ShortPrefabName}: Charcoal output blocked (Pause mode). Skipping accelerated smelting this cycle.");
@@ -2187,24 +2254,96 @@ private void GlobalTick()
         private const float LargeFurnace_WoodPerSulfurOre = 0.1666667f;
         private const float LargeFurnace_WoodPerHQMOre = 0.6666667f;
         private const float Refinery_WoodPerCrudeOil = 2.2222222f;
+        private const float SmallFurnace_BaselineWoodPerSecond = 0.5f;
+        private const float LargeFurnace_BaselineWoodPerSecond = 1.0f;
+        private const float Refinery_BaselineWoodPerSecond = 0.5f;
+
+        private float GetWoodCostScale()
+        {
+            if (_config == null || !_config.ReducedWoodCostEnabled) return 1f;
+            return Mathf.Clamp(_config.WoodCostScale, 0f, 1f);
+        }
+
+        private float GetBaselineWoodPerSecond(OvenKind kind)
+        {
+            switch (kind)
+            {
+                case OvenKind.SmallFurnace: return SmallFurnace_BaselineWoodPerSecond;
+                case OvenKind.LargeFurnace: return LargeFurnace_BaselineWoodPerSecond;
+                case OvenKind.SmallRefinery: return Refinery_BaselineWoodPerSecond;
+                default: return 0f;
+            }
+        }
+
+        // How many inputs the plugin can process per cycle for this oven kind. Refineries
+        // hold a single input stack so the per-stack cap binds; furnaces split ore across
+        // input slots and reach the per-cycle total.
+        private int GetPresetThroughputPerCycle(OvenKind kind, out float cycleSeconds)
+        {
+            RefreshCachedPreset();
+            var preset = GetEffectivePresetForKind(_cachedPresetTuning, kind);
+            cycleSeconds = Mathf.Max(MinGlobalLoopInterval, preset.CycleSeconds);
+
+            if (preset.MaxTotalConsumedPerCycle == int.MaxValue)
+                return int.MaxValue;
+
+            return kind == OvenKind.SmallRefinery
+                ? Mathf.Min(preset.MaxConsumedPerStackPerCycle, preset.MaxTotalConsumedPerCycle)
+                : preset.MaxTotalConsumedPerCycle;
+        }
+
+        // Wood the vanilla burn consumes per input unit while the plugin smelts at full
+        // speed. The native burn is not suppressed by this plugin, so the pull math must
+        // cover it or the final units strand without fuel.
+        private float GetNativeBurnWoodPerUnit(OvenKind kind)
+        {
+            float burnPerSecond = GetBaselineWoodPerSecond(kind);
+            if (burnPerSecond <= 0f) return 0f;
+
+            int perCycle = GetPresetThroughputPerCycle(kind, out float cycleSeconds);
+            if (perCycle <= 0 || perCycle == int.MaxValue) return 0f;
+
+            return cycleSeconds * burnPerSecond / perCycle;
+        }
+
+        private float EstimateNativeBurnWood(OvenKind kind, int totalInputUnits)
+        {
+            if (totalInputUnits <= 0) return 0f;
+
+            float burnPerSecond = GetBaselineWoodPerSecond(kind);
+            if (burnPerSecond <= 0f) return 0f;
+
+            int perCycle = GetPresetThroughputPerCycle(kind, out float cycleSeconds);
+            if (perCycle <= 0 || perCycle == int.MaxValue) return 0f;
+
+            // One extra cycle covers the partially-filled final cycle.
+            float estimatedSeconds = (Mathf.Ceil(totalInputUnits / (float)perCycle) + 1f) * cycleSeconds;
+            return estimatedSeconds * burnPerSecond;
+        }
+
         private float GetWoodPerInput(OvenKind kind, string inputShortname)
+        {
+            return GetVanillaWoodPerInput(kind, inputShortname) * GetWoodCostScale();
+        }
+
+        private float GetVanillaWoodPerInput(OvenKind kind, string inputShortname)
         {
             if (string.IsNullOrEmpty(inputShortname)) return 0f;
 
             if (kind == OvenKind.SmallRefinery)
             {
-                return inputShortname == "crude.oil" ? Refinery_WoodPerCrudeOil : 0f;
+                return inputShortname == ItemCrudeOil ? Refinery_WoodPerCrudeOil : 0f;
             }
 
             bool large = kind == OvenKind.LargeFurnace;
 
             switch (inputShortname)
             {
-                case "metal.ore":
+                case ItemMetalOre:
                     return large ? LargeFurnace_WoodPerMetalOre : SmallFurnace_WoodPerMetalOre;
-                case "sulfur.ore":
+                case ItemSulfurOre:
                     return large ? LargeFurnace_WoodPerSulfurOre : SmallFurnace_WoodPerSulfurOre;
-                case "hq.metal.ore":
+                case ItemHqMetalOre:
                     return large ? LargeFurnace_WoodPerHQMOre : SmallFurnace_WoodPerHQMOre;
                 default:
                     return 0f;
@@ -2235,7 +2374,7 @@ private void GlobalTick()
 
             if (_config.ProduceCharcoalFromFuel && string.Equals(_config.CharcoalOverflowMode, "Pause", StringComparison.OrdinalIgnoreCase))
             {
-                int maxCharcoalCapacity = GetAdditionalCapacity(container, "charcoal");
+                int maxCharcoalCapacity = GetAdditionalCapacity(container, ItemCharcoal);
                 if (maxCharcoalCapacity <= 0)
                     return;
 
@@ -2256,8 +2395,13 @@ private void GlobalTick()
                 }
             }
 
-            int removed = RemoveFuel(container, "wood", desiredRemove);
+            int removed = RemoveFuel(container, ItemWood, desiredRemove);
             tracker.FuelDebt -= removed;
+
+            // The oven ran out of wood: keep only a fractional carry so debt cannot grow
+            // unbounded and instantly drain wood the player adds later.
+            if (removed < desiredRemove && tracker.FuelDebt > 1f)
+                tracker.FuelDebt = 1f;
 
             if (removed > 0 && _config.ProduceCharcoalFromFuel)
             {
@@ -2269,7 +2413,7 @@ private void GlobalTick()
 
                 if (charcoalToGive > 0)
                 {
-                    if (!TryGiveOutput(container, "charcoal", charcoalToGive))
+                    if (!TryGiveOutput(container, ItemCharcoal, charcoalToGive))
                     {
                         if (_config.Debug)
                             Puts("Charcoal output blocked; skipping charcoal minting this tick.");
@@ -2289,29 +2433,24 @@ private void GlobalTick()
         {
             if (tracker == null || container?.itemList == null) return;
 
-            if (isInstantPreset) return;
-
-            if (itemsSmeltedThisTick > 0) return;
-
-            bool isSmallFurnace = kind == OvenKind.SmallFurnace;
-            bool isLargeFurnace = kind == OvenKind.LargeFurnace;
-            bool isRefinery = kind == OvenKind.SmallRefinery;
-
-            if (!isSmallFurnace && !isLargeFurnace && !isRefinery)
-                return;
-
-            float wpi = 0f;
-            if (isRefinery) wpi = GetWoodPerInput(kind, "crude.oil");
-            else wpi = GetWoodPerInput(kind, "metal.ore");
-
-            if (wpi <= 0f) return;
-
             float now = Time.realtimeSinceStartup;
             float elapsed = tracker.LastBalanceTime > 0f ? Mathf.Max(0.01f, now - tracker.LastBalanceTime) : Mathf.Max(0.01f, preset.CycleSeconds);
+
+            // Cap elapsed at a few cycles so a long stretch without idle burn (e.g. while
+            // actively smelting, or while the oven sat without inputs) is not billed retroactively.
+            elapsed = Mathf.Min(elapsed, Mathf.Max(1f, preset.CycleSeconds * 4f));
             tracker.LastBalanceTime = now;
 
-            float cycleSeconds = Mathf.Max(0.01f, preset.CycleSeconds);
-            float targetThisTick = (preset.MaxTotalConsumedPerCycle * wpi) * (elapsed / cycleSeconds);
+            if (isInstantPreset) return;
+            if (itemsSmeltedThisTick > 0) return;
+
+            float baselineWoodPerSecond = GetBaselineWoodPerSecond(kind);
+            if (baselineWoodPerSecond <= 0f) return;
+
+            // Rust already consumes the native 1x share. SmartSmelt contributes only the
+            // additional preset share, preventing (for example) a 10x preset becoming 11x.
+            float additionalMultiplier = Mathf.Max(0f, multiplier - 1f);
+            float targetThisTick = baselineWoodPerSecond * additionalMultiplier * GetWoodCostScale() * elapsed;
             if (targetThisTick <= 0f) return;
 
             ConsumeWoodDebt(tracker, container, targetThisTick);
@@ -2337,7 +2476,7 @@ private void GlobalTick()
             return removed;
         }
 
-#endregion
+        #endregion
 
         #region Smelt conversion
 
@@ -2354,10 +2493,10 @@ private void GlobalTick()
 
                 if (kind == OvenKind.SmallRefinery)
                 {
-                    if (sn == "crude.oil")
+                    if (sn == ItemCrudeOil)
                         results.Add(it);
                 }
-                else if (sn == "metal.ore" || sn == "sulfur.ore" || sn == "hq.metal.ore")
+                else if (sn == ItemMetalOre || sn == ItemSulfurOre || sn == ItemHqMetalOre)
                 {
                     results.Add(it);
                 }
@@ -2375,24 +2514,24 @@ private void GlobalTick()
 
             if (kind == OvenKind.SmallRefinery)
             {
-                if (inSn != "crude.oil") return false;
-                outSn = "lowgradefuel";
+                if (inSn != ItemCrudeOil) return false;
+                outSn = ItemLowGradeFuel;
                 outPerIn = 3;
             }
             else
             {
                 switch (inSn)
                 {
-                    case "metal.ore":
-                        outSn = "metal.fragments";
+                    case ItemMetalOre:
+                        outSn = ItemMetalFragments;
                         outPerIn = 1;
                         break;
-                    case "sulfur.ore":
-                        outSn = "sulfur";
+                    case ItemSulfurOre:
+                        outSn = ItemSulfur;
                         outPerIn = 1;
                         break;
-                    case "hq.metal.ore":
-                        outSn = "metal.refined";
+                    case ItemHqMetalOre:
+                        outSn = ItemMetalRefined;
                         outPerIn = 1;
                         break;
                     default:
@@ -2418,38 +2557,78 @@ private void GlobalTick()
             var def = GetCachedItemDefinition(shortname);
             if (def == null) return false;
 
+            // All-or-nothing: never partially deliver output, because the caller only
+            // consumes input when this returns true. A partial give would mint free items.
+            if (GetAdditionalCapacity(container, shortname) < amount) return false;
+
+            var toppedUp = GetPooledItemList();
+            var created = GetPooledItemList();
+            int[] toppedAmounts = PoolGetIntArray(Mathf.Max(1, container.itemList.Count));
             int remaining = amount;
 
-            foreach (var it in container.itemList)
+            try
             {
-                if (it?.info == null) continue;
-                if (it.info.itemid != def.itemid) continue;
-                if (it.amount >= it.MaxStackable()) continue;
-
-                int can = Mathf.Min(remaining, it.MaxStackable() - it.amount);
-                it.amount += can;
-                it.MarkDirty();
-                remaining -= can;
-                if (remaining <= 0) return true;
-            }
-
-            while (remaining > 0)
-            {
-                int give = Mathf.Min(remaining, def.stackable);
-
-                var created = ItemManager.Create(def, give);
-                if (created == null) return false;
-
-                if (!created.MoveToContainer(container))
+                foreach (var it in container.itemList)
                 {
-                    created.Remove();
-                    return false;
+                    if (remaining <= 0) break;
+                    if (it?.info == null) continue;
+                    if (it.info.itemid != def.itemid) continue;
+
+                    int maxStack = it.MaxStackable();
+                    if (it.amount >= maxStack) continue;
+
+                    int can = Mathf.Min(remaining, maxStack - it.amount);
+                    toppedAmounts[toppedUp.Count] = can;
+                    toppedUp.Add(it);
+                    it.amount += can;
+                    it.MarkDirty();
+                    remaining -= can;
                 }
 
-                remaining -= give;
+                while (remaining > 0)
+                {
+                    int give = Mathf.Min(remaining, def.stackable);
+
+                    var item = ItemManager.Create(def, give);
+                    if (item == null || !item.MoveToContainer(container))
+                    {
+                        if (item != null) item.Remove();
+                        RollbackOutputGive(container, toppedUp, toppedAmounts, created);
+                        return false;
+                    }
+
+                    created.Add(item);
+                    remaining -= give;
+                }
+
+                return true;
+            }
+            finally
+            {
+                PoolReturnIntArray(toppedAmounts);
+                ReturnPooledItemList(toppedUp);
+                ReturnPooledItemList(created);
+            }
+        }
+
+        private void RollbackOutputGive(ItemContainer container, List<Item> toppedUp, int[] toppedAmounts, List<Item> created)
+        {
+            for (int i = 0; i < toppedUp.Count; i++)
+            {
+                var it = toppedUp[i];
+                if (it == null) continue;
+
+                it.amount -= toppedAmounts[i];
+                if (it.amount <= 0) it.Remove();
+                else it.MarkDirty();
             }
 
-            return true;
+            for (int i = 0; i < created.Count; i++)
+            {
+                var it = created[i];
+                if (it == null) continue;
+                if (it.parent == container) it.Remove();
+            }
         }
         private int GetAdditionalCapacity(ItemContainer container, string shortname)
         {

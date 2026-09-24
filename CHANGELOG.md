@@ -1,5 +1,26 @@
 # Changelog
 
+## Version 1.2.2
+### Fixed
+- Wood-only furnace operation now follows the selected preset instead of falling back to vanilla speed.
+- Idle fuel acceleration now subtracts Rust's native 1x burn, preventing preset over-consumption (for example, 10x behaving like 11x).
+- Invalid configuration recovery now writes the regenerated configuration to disk.
+- Version 1 fuel-cost settings are migrated to the new fields without changing their effective behavior.
+
+### Changed
+- Runtime item-definition caches are rebuilt after server initialization for safer startup ordering.
+- Existing configuration values remain intact during this update; no schema change is required.
+
+## Version 1.2.1
+### Added
+- Optional reduced wood-cost controls with configurable scaling.
+
+### Changed
+- Improved native burn-rate and fuel-headroom calculations.
+- Output insertion is rollback-safe when a complete output grant cannot be made.
+- Consolidated preset and item definitions into reusable constants.
+- Improved round-robin oven processing fairness under load.
+
 ##Version 1.1.9
 ### Changes
 -   Added chunked startup oven scanning to reduce possible server-frame spike during initialization.

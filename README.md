@@ -5,6 +5,8 @@
 
 High-performance, preset-based smelting accelerator for **Rust (uMod/Oxide)** with automation-safe behavior, smart fuel pull, and population-aware **AutoTune** scheduling.
 
+Current version: **1.2.2**
+
 > Designed for modded servers (2x–1000x+), heavy conveyor automation, and wipe-day peak usage.
 
 ---
@@ -16,6 +18,8 @@ High-performance, preset-based smelting accelerator for **Rust (uMod/Oxide)** wi
 - **Adaptive scaling**: processes more ovens per loop as load increases
 - **Dynamic loop interval**: automatically adjusts tick interval based on active ovens
 - **Smart fuel auto-pull**: pulls only the **additional** wood needed (delta-based)
+- **Consistent wood-only burn**: lit furnaces follow the selected preset even without ore
+- **Native-rate accounting**: accelerated idle burn adds only the amount above Rust's built-in 1x consumption
 - **Mixed-ore fuel top-up fix**: adding a second ore type triggers a NextTick recalc
 - **Large furnace fuel balancing**: distributes wood across fuel slots
 - **Charcoal overflow control**: `Skip` (automation-friendly) or `Pause` (vanilla-strict)
@@ -78,7 +82,7 @@ AutoTune automatically selects scheduling settings based on your **AveragePopula
 "AutoTuneEnabled": true,
 "AveragePopulation": 300,
 "AutoTuneBias": "Balanced",
-"AutoTuneWriteToConfig": true
+"AutoTuneWriteToConfig": false
 ```
 
 Bias modes:
@@ -88,8 +92,8 @@ Bias modes:
 - `Responsiveness` — more aggressive (snappier updates)
 
 **AutoTuneWriteToConfig**
-- `true` (default): writes the chosen scheduling values into the config so you can see them
-- `false`: runtime-only tuning; config stays as you wrote it
+- `false` (default): runtime-only tuning; config stays as you wrote it
+- `true`: writes the chosen scheduling values into the config so you can see them
 
 ### Ore splitting
 
@@ -108,6 +112,17 @@ Bias modes:
 
 - `Skip` (recommended): prevents automation stalls
 - `Pause`: vanilla-strict behavior (can stall under heavy charcoal congestion)
+
+### Reduced wood cost
+
+```json
+"ReducedWoodCostEnabled": false,
+"WoodCostScale": 0.5
+```
+
+- When disabled, fuel and charcoal production follow the selected preset normally.
+- When enabled, `WoodCostScale` controls the accelerated portion of wood consumption.
+- Existing configuration values and administrator preferences are preserved during normal upgrades.
 
 ---
 
