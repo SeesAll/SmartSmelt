@@ -5,7 +5,7 @@
 
 High-performance, preset-based smelting accelerator for **Rust (uMod/Oxide)** with automation-safe behavior, smart fuel pull, and population-aware **AutoTune** scheduling.
 
-Current version: **1.2.2**
+Current version: **1.2.3**
 
 > Designed for modded servers (2x–1000x+), heavy conveyor automation, and wipe-day peak usage.
 
@@ -19,6 +19,7 @@ Current version: **1.2.2**
 - **Dynamic loop interval**: automatically adjusts tick interval based on active ovens
 - **Smart fuel auto-pull**: pulls only the **additional** wood needed (delta-based)
 - **Consistent wood-only burn**: lit furnaces follow the selected preset even without ore
+- **Mixing-table acceleration**: recipes use the same selected preset as furnaces
 - **Native-rate accounting**: accelerated idle burn adds only the amount above Rust's built-in 1x consumption
 - **Mixed-ore fuel top-up fix**: adding a second ore type triggers a NextTick recalc
 - **Large furnace fuel balancing**: distributes wood across fuel slots
@@ -103,6 +104,16 @@ Bias modes:
 
 - `true`: distributes moved ore across input slots (when safe)
 - `false`: respects vanilla stacking, but fuel auto-pull still works
+
+### Mixing tables
+
+```json
+"EnableMixingTableScaling": true
+```
+
+- `true`: mixing-table recipe duration follows the selected SmartSmelt preset.
+- `false`: leaves mixing tables at Rust's vanilla speed.
+- The setting is added automatically during upgrades without replacing existing administrator preferences.
 
 ### Charcoal overflow
 

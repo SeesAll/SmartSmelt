@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("SmartSmelt", "SeesAll", "1.2.2")]
+    [Info("SmartSmelt", "SeesAll", "1.2.3")]
     [Description("Preset-based accelerated smelting with instant sync, adaptive scaling, and smart fuel pull.")]
     public class SmartSmelt : RustPlugin
     {
@@ -40,7 +40,7 @@ namespace Oxide.Plugins
         private class Configuration
         {
             public bool Enabled = true;
-            public int ConfigVersion = 2;
+            public int ConfigVersion = 3;
             public string Preset = "10x";
             public string PresetOptions = "2x, 3x, 5x, 10x, 25x, 50x, 100x, 1000x, instant";
 
@@ -50,6 +50,7 @@ namespace Oxide.Plugins
             public bool AutoTuneWriteToConfig = false;
 
             public bool EnableOreSplitting = true;
+            public bool EnableMixingTableScaling = true;
             public List<string> OvenWhitelist = new List<string>(DefaultOvenWhitelist);
             public bool ForceStartCookingOnToggle = true;
             public bool VerboseTrackingLogs = false;
@@ -187,9 +188,18 @@ namespace Oxide.Plugins
                     changed = true;
                 }
 
+                if (version < 3)
+                {
+                    if (!raw.ContainsKey("EnableMixingTableScaling"))
+                        raw["EnableMixingTableScaling"] = true;
+
+                    raw["ConfigVersion"] = 3;
+                    changed = true;
+                }
+
                 if (!raw.ContainsKey("ConfigVersion"))
                 {
-                    raw["ConfigVersion"] = 2;
+                    raw["ConfigVersion"] = 3;
                     changed = true;
                 }
 
@@ -264,11 +274,11 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            // Version 2 introduced ReducedWoodCostEnabled / WoodCostScale; bumping the version
-            // forces a save so the new keys appear in existing config files.
-            if (_config.ConfigVersion != 2)
+            // Version 3 introduced mixing-table preset scaling; bumping the version forces a
+            // save so the new key appears without replacing existing administrator settings.
+            if (_config.ConfigVersion != 3)
             {
-                _config.ConfigVersion = 2;
+                _config.ConfigVersion = 3;
                 changed = true;
             }
 
@@ -863,6 +873,42 @@ namespace Oxide.Plugins
                 {
                     StopTracking(oven);
                 }
+            });
+        }
+
+        private void OnMixingTableToggle(MixingTable table, BasePlayer player)
+        {
+            if (_config == null || !_config.Enabled || !_config.EnableMixingTableScaling)
+                return;
+            if (table == null || table.IsDestroyed || table.IsOn())
+                return;
+
+            // Rust calculates the selected recipe and its full duration as the table starts.
+            // Apply the preset on the next tick so those vanilla values are ready first.
+            NextTick(() =>
+            {
+                if (table == null || table.IsDestroyed || !table.IsOn())
+                    return;
+
+                RefreshCachedPreset();
+                float multiplier = Mathf.Max(1f, _cachedPresetMultiplier);
+                if (multiplier <= 1f || table.RemainingMixTime <= 0f)
+                    return;
+
+                table.RemainingMixTime /= multiplier;
+                table.TotalMixTime /= multiplier;
+                table.SendNetworkUpdateImmediate();
+
+                // Vanilla ticks once per second. Reschedule sub-second recipes so high and
+                // Instant presets do not wait for an unnecessary full vanilla tick.
+                if (table.RemainingMixTime < 1f)
+                {
+                    table.CancelInvoke(table.TickMix);
+                    table.Invoke(table.TickMix, Mathf.Max(0.01f, table.RemainingMixTime));
+                }
+
+                if (_config.Debug)
+                    Puts($"Mixing table started at {ResolvePresetKey(_config.Preset)} ({multiplier:0}x); remaining time is {table.RemainingMixTime:0.###}s.");
             });
         }
 

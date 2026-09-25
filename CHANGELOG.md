@@ -1,5 +1,14 @@
 # Changelog
 
+## Version 1.2.3
+### Added
+- Mixing-table recipes can now use the same speed preset as furnaces.
+- Added `EnableMixingTableScaling`, enabled by default and independently configurable.
+
+### Changed
+- Existing configurations migrate to schema version 3 while preserving all administrator settings.
+- Sub-second mixing recipes are rescheduled precisely instead of waiting for Rust's one-second mixing tick.
+
 ## Version 1.2.2
 ### Fixed
 - Wood-only furnace operation now follows the selected preset instead of falling back to vanilla speed.
