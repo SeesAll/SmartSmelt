@@ -1,5 +1,25 @@
 # Changelog
 
+## Version 1.2.4
+
+- Fixed a critical ore-duplication vulnerability when adding ore to uneven furnace input stacks.
+- Capped every custom destination increase to the exact quantity deducted from the source stack.
+- Applied the same quantity invariant and rollback protection to refinery crude-oil distribution.
+- Added a re-entrancy guard so the same source item cannot be processed by overlapping custom moves.
+- Updated `CanMoveItem` to Rust's current `ItemMoveModifier` hook signature.
+- Hardened destination validation so custom splitting runs only for the exact looted oven and its input slots.
+- Removed the obsolete alternate `CanMoveItem` overload to reduce ambiguous move handling.
+- Added conservation-safe post-transfer rebalancing for hover-loot/H-key, bulk-transfer, and other movement paths that bypass `CanMoveItem`.
+- Restored automatic fuel pulling after H-key transfers by resolving the player currently looting the furnace.
+- Fixed mixed-ore H-key transfers so fuel is recalculated even when the furnace already contains another ore type.
+- Newly added ore now spreads across its own occupied slots and any remaining empty input slots without rearranging other ore types.
+- Made post-transfer rebalancing transactional, with exact rollback if an item creation or move fails.
+- Kept differently skinned stacks isolated throughout both pre-move and post-move distribution.
+- Prevented fallback fuel pulling from selecting the wrong inventory when multiple players are looting the same furnace.
+- Coalesced same-player fuel recalculations while rejecting ambiguous same-tick requests from different players.
+- Avoided redundant rebalance allocations and network updates when input stacks are already even.
+- Added overflow guards and stricter item/skin validation around custom furnace and refinery moves.
+
 ## Version 1.2.3
 ### Added
 - Mixing-table recipes can now use the same speed preset as furnaces.

@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("SmartSmelt", "SeesAll", "1.2.3")]
+    [Info("SmartSmelt", "SeesAll", "1.2.4")]
     [Description("Preset-based accelerated smelting with instant sync, adaptive scaling, and smart fuel pull.")]
     public class SmartSmelt : RustPlugin
     {
@@ -389,7 +389,7 @@ namespace Oxide.Plugins
         private int _effDynamicLowOvenCount;
         private int _effDynamicHighOvenCount;
         private float _effFixedGlobalLoopInterval;
-        private readonly HashSet<ulong> _pendingFuelRecalc = new HashSet<ulong>();
+        private readonly Dictionary<ulong, ulong> _pendingFuelRecalcPlayers = new Dictionary<ulong, ulong>();
         private readonly Dictionary<ulong, bool> _pendingAutomationToggleStates = new Dictionary<ulong, bool>();
         private void RefreshEffectiveScheduling(bool allowWriteToConfig)
         {
@@ -545,18 +545,30 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (_pendingFuelRecalc.Add(id))
+            ulong playerId = player.userID;
+            if (_pendingFuelRecalcPlayers.TryGetValue(id, out var pendingPlayerId))
             {
-                NextTick(() =>
-                {
-                    _pendingFuelRecalc.Remove(id);
-
-                    if (oven == null || oven.IsDestroyed) return;
-                    if (player == null || !player.IsConnected) return;
-
-                    TryAutoPullFuel(oven, player);
-                });
+                // Multiple requests from the same player still collapse into one scan. A
+                // different player makes ownership ambiguous, so skip automatic withdrawal.
+                if (pendingPlayerId != playerId)
+                    _pendingFuelRecalcPlayers[id] = 0ul;
+                return;
             }
+
+            _pendingFuelRecalcPlayers[id] = playerId;
+            NextTick(() =>
+            {
+                if (!_pendingFuelRecalcPlayers.TryGetValue(id, out var resolvedPlayerId))
+                    return;
+
+                _pendingFuelRecalcPlayers.Remove(id);
+
+                if (resolvedPlayerId == 0ul || resolvedPlayerId != playerId) return;
+                if (oven == null || oven.IsDestroyed) return;
+                if (player == null || !player.IsConnected) return;
+
+                TryAutoPullFuel(oven, player);
+            });
         }
 
         #endregion
@@ -689,6 +701,9 @@ namespace Oxide.Plugins
 
         private readonly Dictionary<ulong, OvenTracker> _active = new Dictionary<ulong, OvenTracker>();
         private readonly Dictionary<ulong, string> _cachedOvenPrefabNamesLower = new Dictionary<ulong, string>();
+        private readonly HashSet<Item> _customMovesInProgress = new HashSet<Item>();
+        private readonly HashSet<ulong> _pendingPostMoveRebalances = new HashSet<ulong>();
+        private readonly HashSet<ulong> _postMoveRebalancesInProgress = new HashSet<ulong>();
 
         private int _activeVersion = 0;
         private int _tmpTrackerIdsBuiltForVersion = -1;
@@ -811,6 +826,11 @@ namespace Oxide.Plugins
 
             _active.Clear();
             _cachedOvenPrefabNamesLower.Clear();
+            _pendingFuelRecalcPlayers.Clear();
+            _pendingAutomationToggleStates.Clear();
+            _customMovesInProgress.Clear();
+            _pendingPostMoveRebalances.Clear();
+            _postMoveRebalancesInProgress.Clear();
             MarkActiveChanged();
             permission.RegisterPermission(PermAdmin, this);
             permission.RegisterPermission(PermDebug, this);
@@ -827,7 +847,43 @@ namespace Oxide.Plugins
             DisposeStartupScanEnumerator();
             _active.Clear();
             _cachedOvenPrefabNamesLower.Clear();
+            _pendingFuelRecalcPlayers.Clear();
+            _pendingAutomationToggleStates.Clear();
+            _customMovesInProgress.Clear();
+            _pendingPostMoveRebalances.Clear();
+            _postMoveRebalancesInProgress.Clear();
             MarkActiveChanged();
+        }
+
+        private void OnItemAddedToContainer(ItemContainer container, Item item)
+        {
+            if (_config == null || !_config.Enabled) return;
+            if (container == null || item?.info == null) return;
+
+            var oven = container.entityOwner as BaseOven;
+            if (oven == null || oven.IsDestroyed || container != oven.inventory) return;
+            if (!IsWhitelistedSmeltingOven(oven)) return;
+
+            var kind = GetKind(oven);
+            string shortname = item.info.shortname;
+            if (kind == OvenKind.SmallRefinery)
+            {
+                if (shortname != ItemCrudeOil) return;
+            }
+            else if (!IsOreShortname(shortname))
+            {
+                return;
+            }
+
+            // Capture the item type that caused the hook. For mixed-ore furnaces this lets
+            // the fallback spread only the newly-added type into its own and empty slots,
+            // without disturbing ore types the player already arranged.
+            QueuePostMoveInputRebalance(
+                oven,
+                null,
+                item.info,
+                item.skin,
+                kind == OvenKind.SmallRefinery || _config.EnableOreSplitting);
         }
         private void OnEntityKill(BaseNetworkable ent)
         {
@@ -1087,7 +1143,30 @@ namespace Oxide.Plugins
             return DistributeOreIntoInputSlots(oven, item, amount, player);
         }
 
-        private object CanMoveItem(Item item, PlayerInventory inventory, ItemContainerId targetContainerId, int targetSlotIndex, int splitAmount)
+        private object HandleOvenInsertionGuarded(BaseOven oven, Item item, int amount, BasePlayer player)
+        {
+            if (item == null) return null;
+
+            // Never let two nested hook invocations mint destination stacks from the same
+            // source item before the first invocation has debited it.
+            if (!_customMovesInProgress.Add(item))
+            {
+                if (_config != null && _config.Debug)
+                    PrintWarning($"Cancelled re-entrant custom move for {item.info?.shortname ?? "unknown item"}.");
+                return true;
+            }
+
+            try
+            {
+                return HandleOvenInsertion(oven, item, amount, player);
+            }
+            finally
+            {
+                _customMovesInProgress.Remove(item);
+            }
+        }
+
+        private object CanMoveItem(Item item, PlayerInventory inventory, ItemContainerId targetContainerId, int targetSlotIndex, int splitAmount, ItemMoveModifier itemMoveModifier)
         {
             try
             {
@@ -1101,13 +1180,29 @@ namespace Oxide.Plugins
                 if (oven == null || oven.IsDestroyed) return null;
                 if (!IsWhitelistedSmeltingOven(oven)) return null;
 
-                var targetContainer = inventory.FindContainer(targetContainerId);
-                if (targetContainer != null && !(targetContainer.entityOwner is BaseOven)) return null;
-
                 var original = item.GetRootContainer();
                 if (original == null || (original.entityOwner is BaseOven)) return null;
 
-                return HandleOvenInsertion(oven, item, splitAmount, player);
+                var targetContainer = inventory.FindContainer(targetContainerId);
+                if (targetContainer == null)
+                {
+                    // Right-click/quick-move calls CanMoveItem before Rust resolves the ideal
+                    // destination container. Accept that path only when the item originates in
+                    // this player and the currently looted entity is the validated oven. Alt
+                    // quick-moves resolve back toward the player inventory and must pass through.
+                    if (targetContainerId.IsValid || itemMoveModifier.HasFlag(ItemMoveModifier.Alt)) return null;
+                    if (original.entityOwner != player) return null;
+                }
+                else
+                {
+                    if (targetContainer != oven.inventory || targetContainer.entityOwner != oven) return null;
+
+                    int minSlot, maxSlot, inputSlots;
+                    if (!TryGetOvenInputSlotRange(oven, targetContainer, out minSlot, out maxSlot, out inputSlots)) return null;
+                    if (targetSlotIndex >= 0 && (targetSlotIndex < minSlot || targetSlotIndex > maxSlot)) return null;
+                }
+
+                return HandleOvenInsertionGuarded(oven, item, splitAmount, player);
             }
             catch (Exception ex)
             {
@@ -1464,9 +1559,16 @@ namespace Oxide.Plugins
 
                     var isn = it.info?.shortname;
                     if (isn == null) continue;
-                    if (isn != ItemCrudeOil) return null;
+                    if (isn != ItemCrudeOil || it.info != item.info || it.skin != item.skin)
+                    {
+                        if (actorPlayer != null) QueueFuelRecalcNextTick(oven, actorPlayer);
+                        return null;
+                    }
 
-                    existingCrude += it.amount;
+                    if (it.amount >= int.MaxValue - existingCrude)
+                        existingCrude = int.MaxValue;
+                    else
+                        existingCrude += it.amount;
                 }
 
                 int itemAmount = GetMoveAmount(item, splitAmount);
@@ -1526,7 +1628,7 @@ namespace Oxide.Plugins
                     var isn = it.info?.shortname;
                     if (isn == null) continue;
 
-                    if (IsOreShortname(isn) && isn != sn)
+                    if (it.info != item.info || it.skin != item.skin)
                     {
                         if (actorPlayer != null) QueueFuelRecalcNextTick(oven, actorPlayer);
                         return null;
@@ -1536,12 +1638,14 @@ namespace Oxide.Plugins
                 int itemAmount = GetMoveAmount(item, splitAmount);
                 if (itemAmount <= 0) return null;
 
-                int existingTotal = CountMatchingInputItems(container, item.info, minSlot, maxSlot);
+                int existingTotal = CountMatchingInputItems(container, item.info, item.skin, minSlot, maxSlot);
                 int cap = CalculateInputSlotCapacity(item.info, slots);
-                int totalAmount = Math.Min(existingTotal + itemAmount, cap);
-                if (totalAmount <= existingTotal) return null;
+                int allowedToMove = Math.Min(itemAmount, Math.Max(0, cap - existingTotal));
+                if (allowedToMove <= 0) return null;
 
-                int totalMoved = DistributeItemEvenlyAcrossInputSlots(container, item, minSlot, maxSlot, slots, totalAmount, itemAmount);
+                int totalAmount = existingTotal + allowedToMove;
+
+                int totalMoved = DistributeItemEvenlyAcrossInputSlots(container, item, minSlot, maxSlot, slots, totalAmount, allowedToMove);
                 if (totalMoved <= 0) return null;
 
                 FinalizeCustomInsertion(oven, container, item, totalMoved, actorPlayer, "ore input distribution");
@@ -1590,18 +1694,278 @@ namespace Oxide.Plugins
             return (int)capLong;
         }
 
-        private int CountMatchingInputItems(ItemContainer container, ItemDefinition definition, int minSlot, int maxSlot)
+        private int CountMatchingInputItems(ItemContainer container, ItemDefinition definition, ulong skin, int minSlot, int maxSlot)
         {
             if (container == null || definition == null) return 0;
 
-            int total = 0;
+            long total = 0L;
             for (int i = minSlot; i <= maxSlot; i++)
             {
                 var it = container.GetSlot(i);
-                if (it != null && it.info == definition)
+                if (it != null && it.info == definition && it.skin == skin)
+                {
                     total += it.amount;
+                    if (total >= int.MaxValue) return int.MaxValue;
+                }
             }
-            return total;
+            return (int)total;
+        }
+
+        private BasePlayer FindPlayerLootingOven(BaseOven oven)
+        {
+            if (oven == null) return null;
+
+            BasePlayer match = null;
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (player == null || !player.IsConnected) continue;
+                if (player.inventory?.loot?.entitySource != oven) continue;
+
+                // Never guess whose inventory should supply fuel. Multiple simultaneous
+                // looters are uncommon, but choosing the first one could take another
+                // player's wood after an H/hover transfer.
+                if (match != null) return null;
+                match = player;
+            }
+
+            return match;
+        }
+
+        private void QueuePostMoveInputRebalance(BaseOven oven, BasePlayer actorPlayer, ItemDefinition addedDefinition, ulong addedSkin, bool rebalanceInputs)
+        {
+            if (oven == null || oven.IsDestroyed) return;
+
+            ulong id = oven.net != null ? oven.net.ID.Value : 0ul;
+            if (id != 0ul && !_pendingPostMoveRebalances.Add(id)) return;
+
+            NextTick(() =>
+            {
+                if (id != 0ul) _pendingPostMoveRebalances.Remove(id);
+                if (oven == null || oven.IsDestroyed) return;
+
+                var player = actorPlayer;
+                if (player == null || !player.IsConnected || player.inventory?.loot?.entitySource != oven)
+                    player = FindPlayerLootingOven(oven);
+
+                RebalanceExistingOvenInputs(oven, player, addedDefinition, addedSkin, rebalanceInputs);
+            });
+        }
+
+        private void RebalanceExistingOvenInputs(BaseOven oven, BasePlayer actorPlayer, ItemDefinition addedDefinition, ulong addedSkin, bool rebalanceInputs)
+        {
+            if (oven == null || oven.IsDestroyed) return;
+
+            ulong id = oven.net != null ? oven.net.ID.Value : 0ul;
+            if (id != 0ul && !_postMoveRebalancesInProgress.Add(id)) return;
+
+            try
+            {
+                var container = oven.inventory;
+                int minSlot, maxSlot, slots;
+                if (!TryGetOvenInputSlotRange(oven, container, out minSlot, out maxSlot, out slots)) return;
+
+                var kind = GetKind(oven);
+                ItemDefinition definition = addedDefinition;
+                ulong skin = addedSkin;
+                long totalLong = 0L;
+                var eligibleSlots = new List<int>(slots);
+                var emptySlots = new List<int>(slots);
+
+                if (!rebalanceInputs) return;
+
+                for (int i = minSlot; i <= maxSlot; i++)
+                {
+                    var current = container.GetSlot(i);
+                    if (current == null)
+                    {
+                        emptySlots.Add(i);
+                        continue;
+                    }
+
+                    string shortname = current.info?.shortname;
+                    bool validInput = kind == OvenKind.SmallRefinery
+                        ? shortname == ItemCrudeOil
+                        : IsOreShortname(shortname);
+                    if (!validInput) return;
+
+                    if (definition == null && current.info != null)
+                    {
+                        definition = current.info;
+                        skin = current.skin;
+                    }
+
+                    if (current.info == definition && current.skin == skin)
+                    {
+                        eligibleSlots.Add(i);
+                        totalLong += current.amount;
+                        if (totalLong > int.MaxValue) return;
+                    }
+                }
+
+                // Keep occupied slots first. If the total is smaller than the number of
+                // eligible slots, zero-sized targets then fall only on empty slots; an
+                // existing stack never needs to be removed and recreated.
+                eligibleSlots.AddRange(emptySlots);
+
+                if (definition == null || totalLong <= 0L || eligibleSlots.Count <= 1) return;
+
+                int totalBefore = (int)totalLong;
+                int eligibleCount = eligibleSlots.Count;
+                int baseAmount = totalBefore / eligibleCount;
+                int remainder = totalBefore - baseAmount * eligibleCount;
+
+                bool needsRebalance = false;
+                for (int si = 0; si < eligibleCount; si++)
+                {
+                    var current = container.GetSlot(eligibleSlots[si]);
+                    int currentAmount = current != null && current.info == definition && current.skin == skin
+                        ? current.amount
+                        : 0;
+                    int target = baseAmount + (si < remainder ? 1 : 0);
+                    if (currentAmount == target) continue;
+
+                    needsRebalance = true;
+                    break;
+                }
+
+                // Direct custom moves are already balanced. Avoid transaction-list
+                // allocations and network updates when the post-transfer safety hook agrees.
+                if (!needsRebalance) return;
+
+                int heldAmount = 0;
+                bool committed = false;
+                var reducedItems = new List<KeyValuePair<Item, int>>(eligibleCount);
+                var increasedItems = new List<KeyValuePair<Item, int>>(eligibleCount);
+                var createdItems = new List<Item>(eligibleCount);
+
+                try
+                {
+                    // Drain excess first. No destination can grow until that exact quantity
+                    // has already been removed from another input stack.
+                    for (int si = 0; si < eligibleCount; si++)
+                    {
+                        int slotIndex = eligibleSlots[si];
+                        int target = baseAmount + (si < remainder ? 1 : 0);
+                        var current = container.GetSlot(slotIndex);
+                        if (current == null || current.info != definition || current.skin != skin || current.amount <= target) continue;
+
+                        int take = current.amount - target;
+                        current.amount -= take;
+                        reducedItems.Add(new KeyValuePair<Item, int>(current, take));
+                        heldAmount += take;
+                        current.MarkDirty();
+                    }
+
+                    // Refill deficits using only the quantity drained above.
+                    for (int si = 0; si < eligibleCount && heldAmount > 0; si++)
+                    {
+                        int slotIndex = eligibleSlots[si];
+                        int target = baseAmount + (si < remainder ? 1 : 0);
+                        var current = container.GetSlot(slotIndex);
+                        int currentAmount = current?.amount ?? 0;
+                        int give = Math.Min(target - currentAmount, heldAmount);
+                        if (give <= 0) continue;
+
+                        if (current == null)
+                        {
+                            var created = ItemManager.Create(definition, give, skin);
+                            if (created == null) continue;
+
+                            createdItems.Add(created);
+                            if (!created.MoveToContainer(container, slotIndex, allowStack: false))
+                            {
+                                createdItems.Remove(created);
+                                created.Remove();
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            current.amount += give;
+                            increasedItems.Add(new KeyValuePair<Item, int>(current, give));
+                            current.MarkDirty();
+                        }
+
+                        heldAmount -= give;
+                    }
+
+                    // A failed destination creation restores any held quantity to a source
+                    // stack. This preserves the total even if the ideal layout is unavailable.
+                    if (heldAmount > 0)
+                    {
+                        Item fallback = null;
+                        for (int i = minSlot; i <= maxSlot; i++)
+                        {
+                            var current = container.GetSlot(i);
+                            if (current != null && current.info == definition && current.skin == skin)
+                            {
+                                fallback = current;
+                                break;
+                            }
+                        }
+
+                        if (fallback != null)
+                        {
+                            fallback.amount += heldAmount;
+                            increasedItems.Add(new KeyValuePair<Item, int>(fallback, heldAmount));
+                            fallback.MarkDirty();
+                            heldAmount = 0;
+                        }
+                    }
+
+                    int totalAfter = CountMatchingInputItems(container, definition, skin, minSlot, maxSlot);
+                    if (heldAmount != 0 || totalAfter != totalBefore)
+                        throw new InvalidOperationException($"Unsafe post-move quantity change for {definition.shortname}: {totalBefore} -> {totalAfter}, held={heldAmount}.");
+
+                    committed = true;
+                    container.MarkDirty();
+                    oven.SendNetworkUpdateImmediate();
+                }
+                finally
+                {
+                    if (!committed)
+                    {
+                        // Restore the exact pre-rebalance quantities if any operation throws.
+                        for (int i = increasedItems.Count - 1; i >= 0; i--)
+                        {
+                            var change = increasedItems[i];
+                            if (change.Key == null) continue;
+                            change.Key.amount = Math.Max(0, change.Key.amount - change.Value);
+                            change.Key.MarkDirty();
+                        }
+
+                        for (int i = createdItems.Count - 1; i >= 0; i--)
+                        {
+                            var created = createdItems[i];
+                            if (created != null) created.Remove();
+                        }
+
+                        for (int i = reducedItems.Count - 1; i >= 0; i--)
+                        {
+                            var change = reducedItems[i];
+                            if (change.Key == null) continue;
+                            change.Key.amount += change.Value;
+                            change.Key.MarkDirty();
+                        }
+
+                        container.MarkDirty();
+                    }
+                }
+
+            }
+            catch (Exception ex)
+            {
+                PrintError($"Post-move furnace rebalance failed: {ex}");
+            }
+            finally
+            {
+                if (id != 0ul) _postMoveRebalancesInProgress.Remove(id);
+
+                // Fuel must be recalculated even when no split was needed or mixed ore was
+                // present. H/hover transfers can bypass CanMoveItem entirely.
+                if (actorPlayer != null && oven != null && !oven.IsDestroyed)
+                    QueueFuelRecalcNextTick(oven, actorPlayer);
+            }
         }
 
         private int DistributeItemEvenlyAcrossInputSlots(ItemContainer container, Item sourceItem, int minSlot, int maxSlot, int slots, int targetTotal, int maxToMove)
@@ -1612,44 +1976,81 @@ namespace Oxide.Plugins
             int baseAmt = targetTotal / slots;
             int rem = targetTotal - baseAmt * slots;
             int totalMoved = 0;
+            int remainingToMove = Math.Min(maxToMove, sourceItem.amount);
+            var createdItems = new List<Item>(slots);
+            var increasedItems = new List<KeyValuePair<Item, int>>(slots);
 
-            for (int si = 0; si < slots; si++)
+            try
             {
-                int slotIndex = minSlot + si;
-                if (slotIndex > maxSlot) break;
-
-                int target = baseAmt + (si < rem ? 1 : 0);
-                var cur = container.GetSlot(slotIndex);
-
-                int curAmt = 0;
-                if (cur != null)
+                for (int si = 0; si < slots && remainingToMove > 0; si++)
                 {
-                    // Never merge stacks with a different skin — that would silently destroy the skin.
-                    if (cur.info != sourceItem.info || cur.skin != sourceItem.skin) return totalMoved;
-                    curAmt = cur.amount;
-                }
+                    int slotIndex = minSlot + si;
+                    if (slotIndex > maxSlot) break;
 
-                int delta = target - curAmt;
-                if (delta <= 0) continue;
+                    int target = baseAmt + (si < rem ? 1 : 0);
+                    var cur = container.GetSlot(slotIndex);
 
-                if (cur == null)
-                {
-                    var newItem = ItemManager.Create(sourceItem.info, delta, sourceItem.skin);
-                    if (newItem == null) continue;
-                    if (!newItem.MoveToContainer(container, slotIndex, allowStack: false))
+                    int curAmt = 0;
+                    if (cur != null)
                     {
-                        newItem.Remove();
-                        continue;
+                        // Never merge stacks with a different skin — that would silently destroy the skin.
+                        if (cur.info != sourceItem.info || cur.skin != sourceItem.skin) break;
+                        curAmt = cur.amount;
                     }
+
+                    int delta = target - curAmt;
+                    if (delta <= 0) continue;
+
+                    // Security invariant: destination growth must never exceed the exact amount
+                    // that will be removed from the source item. Uneven pre-existing stacks can
+                    // make the sum of ideal-slot deficits larger than the incoming stack.
+                    delta = Math.Min(delta, remainingToMove);
+                    if (delta <= 0) break;
+
+                    if (cur == null)
+                    {
+                        var newItem = ItemManager.Create(sourceItem.info, delta, sourceItem.skin);
+                        if (newItem == null) continue;
+
+                        createdItems.Add(newItem);
+                        if (!newItem.MoveToContainer(container, slotIndex, allowStack: false))
+                        {
+                            createdItems.Remove(newItem);
+                            newItem.Remove();
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        cur.amount += delta;
+                        increasedItems.Add(new KeyValuePair<Item, int>(cur, delta));
+                        cur.MarkDirty();
+                    }
+
+                    totalMoved += delta;
+                    remainingToMove -= delta;
                 }
-                else
+            }
+            catch
+            {
+                // Roll back destination mutations so a failed custom move cannot leave both the
+                // original source stack and newly created furnace contents behind.
+                for (int i = increasedItems.Count - 1; i >= 0; i--)
                 {
-                    cur.amount += delta;
-                    cur.MarkDirty();
+                    var change = increasedItems[i];
+                    if (change.Key == null) continue;
+                    change.Key.amount = Math.Max(0, change.Key.amount - change.Value);
+                    change.Key.MarkDirty();
                 }
 
-                totalMoved += delta;
-                if (totalMoved >= maxToMove) break;
+                for (int i = createdItems.Count - 1; i >= 0; i--)
+                {
+                    var created = createdItems[i];
+                    if (created != null) created.Remove();
+                }
+
+                container.MarkDirty();
+                throw;
             }
 
             return totalMoved;
@@ -1710,33 +2111,6 @@ namespace Oxide.Plugins
             {
                 if (_config != null && _config.Debug)
                     PrintWarning($"SmartSmelt safe player network update failed ({context}): {ex.Message}");
-            }
-        }
-
-        private object CanMoveItem(Item item, PlayerInventory playerInventory, ItemContainer targetContainer, int targetSlot, int amount)
-        {
-            try
-            {
-                if (!_config.Enabled) return null;
-                if (item?.info == null || targetContainer == null) return null;
-
-                var owner = targetContainer.entityOwner as BaseOven;
-                if (owner == null || owner.IsDestroyed) return null;
-                if (!IsWhitelistedSmeltingOven(owner)) return null;
-
-                var src = item.parent;
-                if (src != null && src.entityOwner is BaseOven) return null;
-
-                var player = playerInventory?.GetComponent<BasePlayer>();
-
-                return HandleOvenInsertion(owner, item, amount, player);
-            }
-            catch (Exception ex)
-            {
-                if (_config != null && _config.Debug)
-                    PrintWarning($"CanMoveItem(ItemContainer) exception: {ex}");
-
-                return null;
             }
         }
 

@@ -5,7 +5,7 @@
 
 High-performance, preset-based smelting accelerator for **Rust (uMod/Oxide)** with automation-safe behavior, smart fuel pull, and population-aware **AutoTune** scheduling.
 
-Current version: **1.2.3**
+Current version: **1.2.4**
 
 > Designed for modded servers (2x–1000x+), heavy conveyor automation, and wipe-day peak usage.
 
@@ -101,6 +101,15 @@ Bias modes:
 ```json
 "EnableOreSplitting": true
 ```
+
+SmartSmelt 1.2.4 and newer enforce conservation during furnace and refinery
+distribution: the amount added to destination slots can never exceed the amount
+deducted from the incoming stack. Uneven pre-existing stacks are filled safely
+without creating additional ore or crude oil. Direct drag/drop, quick move,
+hover-loot/H-key transfers, and other post-transfer inventory routes are all
+rebalanced through the same conservation rule. In mixed-ore furnaces, the newly
+added ore type uses its existing slots plus any empty input slots without moving
+the ore types the player already arranged.
 
 - `true`: distributes moved ore across input slots (when safe)
 - `false`: respects vanilla stacking, but fuel auto-pull still works
