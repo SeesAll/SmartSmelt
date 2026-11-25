@@ -5,7 +5,7 @@
 
 High-performance, preset-based smelting accelerator for **Rust (uMod/Oxide)** with automation-safe behavior, smart fuel pull, and population-aware **AutoTune** scheduling.
 
-Current version: **1.2.5**
+Current version **1.2.16**
 
 > Designed for modded servers (2x–1000x+), heavy conveyor automation, and wipe-day peak usage.
 
@@ -13,7 +13,8 @@ Current version: **1.2.5**
 
 ## Highlights
 
-- **Preset-based acceleration**: `2x, 3x, 5x, 10x, 25x, 50x, 100x, 1000x, Instant`
+- **Preset-based acceleration** with options from vanilla `1x` through `1000x` and `instant`
+- **Industrial conveyor boosts** for furnace fuel and finished products
 - **Single global loop** (no per-oven timers)
 - **Adaptive scaling**: processes more ovens per loop as load increases
 - **Dynamic loop interval**: automatically adjusts tick interval based on active ovens
@@ -46,7 +47,7 @@ This keeps CPU predictable even with hundreds of active ovens.
 
 ## Installation
 
-SmartSmelt 1.2.5 uses Oxide's [Publicizer](https://docs.oxidemod.com/guides/developers/publicizer), which is enabled by default.
+SmartSmelt uses Oxide's Publicizer, which is enabled by default. [Oxide Publicizer documentation](https://docs.oxidemod.com/guides/developers/publicizer)
 
 1. Place `SmartSmelt.cs` into:
    - `oxide/plugins/`
@@ -62,7 +63,10 @@ SmartSmelt 1.2.5 uses Oxide's [Publicizer](https://docs.oxidemod.com/guides/deve
 - `/ss.info`
   - Shows plugin status, AutoTune status, and effective scheduling values
 - `/ss.debug`
-  - Enables additional debug logging (use briefly)
+  - Shows the active preset, multiplier, tracked ovens, and scheduling values
+- `ss.conveyor status` in the server console shows conveyor eligibility and boost counters.
+- `ss.conveyor discover [all]` lists conveyor network IDs and eligibility. Use `all` to include ineligible filters.
+- `ss.conveyor remove <id>` opts a conveyor out until SmartSmelt reloads. Use `ss.conveyor add <id>` to restore automatic eligibility.
 
 ---
 
@@ -74,8 +78,21 @@ SmartSmelt 1.2.5 uses Oxide's [Publicizer](https://docs.oxidemod.com/guides/deve
 "Preset": "10x"
 ```
 
-Supported:
-`2x, 3x, 5x, 10x, 25x, 50x, 100x, 1000x, Instant`
+Supported presets are `1x, 2x, 3x, 5x, 10x, 25x, 50x, 100x, 1000x, instant`.
+Use `1x` for vanilla smelting, mixing tables, and conveyor behavior.
+
+### Industrial conveyors
+
+```json
+"EnableConveyorBoosts": true
+```
+
+Boosts are enabled by default on non-vanilla SmartSmelt presets. Eligible conveyors must be powered and running in `Any` filter mode.
+
+- **Furnace output** gets extra passes when sulfur, metal fragments, high quality metal, or charcoal is waiting. Use only those products as filters and connect the conveyor to furnace output slots. At `5x` and above, crowded output slots can also trigger a larger move per pass. The limit can rise by about 41% at `5x` and 100% at `10x`, subject to Rust's stack, filter, and destination limits.
+- **Wood input** supports a dedicated wood conveyor or a shared conveyor filtered for wood and raw ores. Dedicated wood conveyors can get extra passes. Shared conveyors boost wood during native passes, so ore transfers keep their normal limit and cadence. At `10x` and above, the wood refill target adapts to furnace demand.
+
+Use `ss.conveyor status` to see whether a route is eligible. The limit counters count occasions when SmartSmelt allowed a larger transfer. Actual units moved depend on the available items and destination space.
 
 ### AutoTune (recommended for ease of use)
 

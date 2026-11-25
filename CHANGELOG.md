@@ -1,5 +1,17 @@
 # Changelog
 
+## Version 1.2.16
+
+This release includes the changes tested since 1.2.5.
+
+- Added the `1x` preset for vanilla behavior. Automatic conveyor boosts default to enabled for non-vanilla SmartSmelt presets and can be disabled with `EnableConveyorBoosts`.
+- Added preset-aware extra passes for eligible output conveyors carrying sulfur, metal fragments, high quality metal, or charcoal.
+- At `5x` and higher, eligible output conveyors can move more per pass when furnace output slots are crowded. Rust still applies item stack sizes, filter limits, and destination capacity.
+- Added wood boosting for dedicated and mixed wood-and-ore inputs. Raw ore keeps its normal transfer limit and cadence. At `10x` and higher, wood refill limits scale with estimated furnace demand, and dedicated wood conveyors can request extra passes more frequently.
+- Added server-console commands to discover eligible conveyors, inspect boost counters, and temporarily opt out individual conveyors.
+- Hardened furnace and refinery input rebalancing, fuel debits, and output placement with quantity checks and rollback. Coalesced follow-up work and reused buffers in the smelting loop.
+- Upgraded existing configurations to schema version 4 while preserving administrator settings.
+
 ## Version 1.2.5
 
 - Updated the `CanMoveItem` hook to resolve the player from `PlayerInventory.baseEntity` for compatibility with Rust's inventory API.
