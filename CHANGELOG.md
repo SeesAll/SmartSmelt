@@ -1,5 +1,9 @@
 # Changelog
 
+## Version 1.2.5
+
+- Updated the `CanMoveItem` hook to resolve the player from `PlayerInventory.baseEntity` for compatibility with Rust's inventory API.
+
 ## Version 1.2.4
 
 - Fixed a critical ore-duplication vulnerability when adding ore to uneven furnace input stacks.

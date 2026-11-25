@@ -4,7 +4,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("SmartSmelt", "SeesAll", "1.2.4")]
+    [Info("SmartSmelt", "SeesAll", "1.2.5")]
     [Description("Preset-based accelerated smelting with instant sync, adaptive scaling, and smart fuel pull.")]
     public class SmartSmelt : RustPlugin
     {
@@ -1173,7 +1173,7 @@ namespace Oxide.Plugins
                 if (!_config.Enabled) return null;
                 if (item?.info == null || inventory == null) return null;
 
-                var player = inventory.GetComponent<BasePlayer>();
+                var player = inventory.baseEntity;
                 if (player == null) return null;
 
                 var oven = inventory.loot?.entitySource as BaseOven;

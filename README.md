@@ -5,7 +5,7 @@
 
 High-performance, preset-based smelting accelerator for **Rust (uMod/Oxide)** with automation-safe behavior, smart fuel pull, and population-aware **AutoTune** scheduling.
 
-Current version: **1.2.4**
+Current version: **1.2.5**
 
 > Designed for modded servers (2x–1000x+), heavy conveyor automation, and wipe-day peak usage.
 
@@ -45,6 +45,8 @@ This keeps CPU predictable even with hundreds of active ovens.
 ---
 
 ## Installation
+
+SmartSmelt 1.2.5 uses Oxide's [Publicizer](https://docs.oxidemod.com/guides/developers/publicizer), which is enabled by default.
 
 1. Place `SmartSmelt.cs` into:
    - `oxide/plugins/`
